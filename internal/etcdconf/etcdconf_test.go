@@ -26,10 +26,17 @@ client-transport-security:
   key-file: /file/server.key
   trusted-ca-file: /file/ca.crt
   client-cert-auth: true
+peer-transport-security:
+  cert-file: /file/peer.crt
+  key-file: /file/peer.key
+  trusted-ca-file: /file/peer-ca.crt
 `
 
 func TestResolve(t *testing.T) {
 	fromFile := Settings{
+		PeerCertFile:        "/file/peer.crt",
+		PeerKeyFile:         "/file/peer.key",
+		PeerTrustedCAFile:   "/file/peer-ca.crt",
 		CertFile:            "/file/server.crt",
 		KeyFile:             "/file/server.key",
 		TrustedCAFile:       "/file/ca.crt",
@@ -59,6 +66,9 @@ func TestResolve(t *testing.T) {
 				"--client-cert-auth",
 				"--listen-client-urls=https://0.0.0.0:2379, https://127.0.0.1:2379",
 				"--advertise-client-urls", "https://10.0.0.1:2379",
+				"--peer-cert-file=/p.crt",
+				"--peer-key-file", "/p.key",
+				"--peer-trusted-ca-file=/pca.crt",
 			},
 			want: Settings{
 				CertFile:            "/s.crt",
@@ -66,6 +76,29 @@ func TestResolve(t *testing.T) {
 				TrustedCAFile:       "/ca.crt",
 				ListenClientURLs:    []string{"https://0.0.0.0:2379", "https://127.0.0.1:2379"},
 				AdvertiseClientURLs: []string{"https://10.0.0.1:2379"},
+				PeerCertFile:        "/p.crt",
+				PeerKeyFile:         "/p.key",
+				PeerTrustedCAFile:   "/pca.crt",
+			},
+		},
+		{
+			name:    "peer auto TLS",
+			args:    []string{"--peer-auto-tls"},
+			environ: []string{"ETCD_PEER_CERT_FILE=/env.crt"},
+			want: Settings{
+				PeerCertFile:        "/env.crt",
+				PeerAutoTLS:         true,
+				ListenClientURLs:    []string{"http://localhost:2379"},
+				AdvertiseClientURLs: []string{"http://localhost:2379"},
+			},
+		},
+		{
+			name:    "peer auto TLS from environment, disabled by flag",
+			args:    []string{"--peer-auto-tls=false"},
+			environ: []string{"ETCD_PEER_AUTO_TLS=true"},
+			want: Settings{
+				ListenClientURLs:    []string{"http://localhost:2379"},
+				AdvertiseClientURLs: []string{"http://localhost:2379"},
 			},
 		},
 		{
@@ -135,6 +168,7 @@ func TestResolveErrors(t *testing.T) {
 	}{
 		{name: "missing config file", args: []string{"--config-file=/missing.yaml"}, want: fs.ErrNotExist},
 		{name: "invalid config file", args: []string{"--config-file=/bad.yaml"}, text: "/bad.yaml"},
+		{name: "invalid peer auto TLS", args: []string{"--peer-auto-tls=maybe"}, text: "peer-auto-tls"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -23,17 +24,25 @@ type Settings struct {
 	TrustedCAFile       string
 	ListenClientURLs    []string
 	AdvertiseClientURLs []string
+	PeerCertFile        string
+	PeerKeyFile         string
+	PeerTrustedCAFile   string
+	PeerAutoTLS         bool
 }
 
 // fileConfig mirrors the keys etcd reads from --config-file.
 type fileConfig struct {
-	ListenClientURLs    string `json:"listen-client-urls"`
-	AdvertiseClientURLs string `json:"advertise-client-urls"`
-	ClientSecurity      struct {
-		CertFile      string `json:"cert-file"`
-		KeyFile       string `json:"key-file"`
-		TrustedCAFile string `json:"trusted-ca-file"`
-	} `json:"client-transport-security"`
+	ListenClientURLs    string         `json:"listen-client-urls"`
+	AdvertiseClientURLs string         `json:"advertise-client-urls"`
+	ClientSecurity      securityConfig `json:"client-transport-security"`
+	PeerSecurity        securityConfig `json:"peer-transport-security"`
+}
+
+type securityConfig struct {
+	CertFile      string `json:"cert-file"`
+	KeyFile       string `json:"key-file"`
+	TrustedCAFile string `json:"trusted-ca-file"`
+	AutoTLS       bool   `json:"auto-tls"`
 }
 
 var valueFlags = map[string]bool{
@@ -43,7 +52,12 @@ var valueFlags = map[string]bool{
 	"trusted-ca-file":       true,
 	"listen-client-urls":    true,
 	"advertise-client-urls": true,
+	"peer-cert-file":        true,
+	"peer-key-file":         true,
+	"peer-trusted-ca-file":  true,
 }
+
+const peerAutoTLS = "peer-auto-tls"
 
 // Resolve reads settings from etcd's command line and environment. As in
 // etcd, a configuration file named by --config-file or ETCD_CONFIG_FILE
@@ -58,15 +72,30 @@ func Resolve(args, environ []string, readFile func(string) ([]byte, error)) (Set
 				values[name] = value
 			}
 		}
+		if key == envName(peerAutoTLS) {
+			values[peerAutoTLS] = value
+		}
 	}
 	for _, f := range flagscan.Scan(args, func(name string) bool { return valueFlags[name] }) {
-		if valueFlags[f.Name] && f.HasValue {
+		switch {
+		case valueFlags[f.Name] && f.HasValue:
 			values[f.Name] = f.Value
+		case f.Name == peerAutoTLS && !f.HasValue:
+			values[peerAutoTLS] = "true"
+		case f.Name == peerAutoTLS:
+			values[peerAutoTLS] = f.Value
 		}
 	}
 
 	if path := values["config-file"]; path != "" {
 		return fromFile(path, readFile)
+	}
+	autoTLS := false
+	if v := values[peerAutoTLS]; v != "" {
+		var err error
+		if autoTLS, err = strconv.ParseBool(v); err != nil {
+			return Settings{}, fmt.Errorf("invalid %s value %q", peerAutoTLS, v)
+		}
 	}
 	return Settings{
 		CertFile:            values["cert-file"],
@@ -74,6 +103,10 @@ func Resolve(args, environ []string, readFile func(string) ([]byte, error)) (Set
 		TrustedCAFile:       values["trusted-ca-file"],
 		ListenClientURLs:    urls(values["listen-client-urls"]),
 		AdvertiseClientURLs: urls(values["advertise-client-urls"]),
+		PeerCertFile:        values["peer-cert-file"],
+		PeerKeyFile:         values["peer-key-file"],
+		PeerTrustedCAFile:   values["peer-trusted-ca-file"],
+		PeerAutoTLS:         autoTLS,
 	}, nil
 }
 
@@ -92,6 +125,10 @@ func fromFile(path string, readFile func(string) ([]byte, error)) (Settings, err
 		TrustedCAFile:       fc.ClientSecurity.TrustedCAFile,
 		ListenClientURLs:    urls(fc.ListenClientURLs),
 		AdvertiseClientURLs: urls(fc.AdvertiseClientURLs),
+		PeerCertFile:        fc.PeerSecurity.CertFile,
+		PeerKeyFile:         fc.PeerSecurity.KeyFile,
+		PeerTrustedCAFile:   fc.PeerSecurity.TrustedCAFile,
+		PeerAutoTLS:         fc.PeerSecurity.AutoTLS,
 	}, nil
 }
 
