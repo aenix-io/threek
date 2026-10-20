@@ -2,7 +2,7 @@
 
 A drop-in etcd supervisor that keeps the Raft leader on a member every other member can reach.
 
-> **Status:** early development, not released yet. The supervisor, the decision engine and the agent are implemented; there is no container image yet. See [docs/design.md](docs/design.md).
+> **Status:** early development, not released yet. The supervisor, the agent and the container image are implemented and tested end to end against blackhole partitions. See [docs/design.md](docs/design.md).
 
 ## The problem
 
@@ -44,23 +44,23 @@ The agent follows one rule:
 
 > If the leader cannot reach some member, and another member reaches everyone, the leader transfers leadership to that member.
 
-- Reachability comes from etcd itself: the `etcd_network_active_peers` metric of each member, read through the client port that is already open between members.
+- Every agent probes its peers with the same request etcd's own prober sends to the peer port, and publishes what it sees in a small record in the cluster itself.
 - Only the leader acts, using the standard `MoveLeader` API. No consensus between agents, no etcd fork, no new ports.
 - When nobody reaches everyone (a site is down, the network is fully split), threek does nothing and Raft behaves as usual.
 - Optionally, a preferred member holds the leader in normal operation, and the leader returns to it after a partition heals.
 
-Expected reaction time with the defaults is about 25 seconds from the link failure.
+With the defaults the leader moves about 20 seconds after the link fails.
 
 ## Requirements and limitations
 
 - Exactly three voting members. Learners are ignored.
-- The client port (2379) must be reachable between members, not only the peer port (2380): the leader reads the other members' metrics through it.
+- The client port (2379) must be reachable between members, not only the peer port (2380): the leader checks the other members' status through it.
 - Client certificate authentication (mTLS) is supported and expected.
   etcd authentication (`etcdctl auth enable`, `spec.auth` in etcd-operator) is not supported: `MoveLeader` requires the root role.
-- Client and peer TLS as configured by Talos or etcd-operator: the agent reuses etcd's own certificates.
+- Client and peer TLS as configured by Talos or etcd-operator: the agent reuses etcd's own certificates. `--peer-auto-tls` is not supported.
 - Synchronized clocks on all members, as etcd itself expects.
 - Clients must not be routed across the partition. threek restores a leader for every member, but a client in one site that is load-balanced to a member in an unreachable site still fails. Use topology-aware routing (for example `trafficDistribution: PreferSameZone`) or list every member in the client configuration.
-- With a preferred leader configured, threek stores small records under the `/threek/members/` prefix of the cluster's own keyspace.
+- Each agent keeps one small record under the `/threek/members/` prefix of the cluster's own keyspace. It is rewritten only when what the member sees changes.
 
 ### Talos
 
@@ -102,6 +102,10 @@ With `--threek-mode=off` the image behaves exactly like upstream etcd, so rollin
 make test   # unit and integration tests; set TEST_ETCD_BINARY to an etcd binary to run the tests against real clusters
 make lint   # golangci-lint
 make build  # bin/threek
+make image IMAGE=threek:dev ETCD_VERSION=v3.6.15
+
+# end-to-end tests: containers with blackhole partitions, needs Docker
+E2E_IMAGE=threek:dev go test -tags e2e -timeout 20m ./test/e2e/
 ```
 
 ## License

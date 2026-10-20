@@ -1,6 +1,6 @@
 # threek design
 
-Status: draft. The supervisor, the decision engine and the agent are implemented. The container image, end-to-end partition tests and the agent's metrics endpoint are not.
+Status: draft. Everything below is implemented except the agent's metrics endpoint. Nothing is released yet.
 
 ## Problem
 
@@ -71,7 +71,8 @@ threek ships as an etcd image in which the `etcd` binary is replaced:
 | `/usr/local/bin/etcd-upstream` | upstream etcd binary, unmodified |
 | `/usr/local/bin/etcdctl`, `/usr/local/bin/etcdutl` | upstream tools of the same etcd version |
 
-The image runs as an unprivileged user and needs no capabilities.
+The image uses the same distroless base, user, command, working directory and ports as the upstream etcd image.
+Like etcd, threek runs as a non-root user without capabilities when the platform starts it that way, as Talos does.
 
 ### Process model
 
@@ -96,71 +97,66 @@ Supervisor behavior:
 
 ### Reading etcd settings
 
-The agent needs a few etcd settings: client TLS files and client URLs.
+The agent needs a few etcd settings: client and peer TLS files and client URLs.
 etcd accepts settings from flags (`-flag`, `--flag`, `--flag=value`, `--flag value`), from `ETCD_*` environment variables and from `--config-file`.
 The agent resolves its subset using etcd's own precedence rules and never rewrites them.
 
 Connections to the local member go to `https://127.0.0.1:2379` (or the first local client URL).
 Both Talos and etcd-operator include `localhost` and `127.0.0.1` in the etcd server certificate SANs and give it the `ClientAuth` extended key usage.
 The agent therefore uses `--cert-file`/`--key-file` as its client certificate and `--trusted-ca-file` to verify the server.
+For probes to the peer port it uses `--peer-cert-file`, `--peer-key-file` and `--peer-trusted-ca-file`, as etcd itself does.
 No additional credentials are needed.
 
 ## Connectivity signal
 
-threek does not probe the network itself.
-It reads what etcd's own Raft transport reports:
+Every agent probes the other voting members once per poll interval with the request etcd's own prober sends: `GET /raft/probing` on the member's peer URL, with the member's peer certificate and a one second timeout.
+A probe succeeds when any peer URL of the member answers `200`.
 
-```text
-etcd_network_active_peers{Local="<member id>", Remote="<peer id>"}
-```
+This is the same traffic etcd already exchanges between peers, so it needs no new firewall rules and makes etcd log nothing.
+A bare TCP connect would not do: etcd logs every peer connection that closes before the TLS handshake.
 
-etcd keeps transport streams between every pair of members, followers included, and sends a link heartbeat over idle streams about every 1.7 s.
-A stream without traffic for 5 s (etcd's fixed connection read timeout) marks the peer inactive.
-This captures what matters (whether Raft messages flow) rather than whether a TCP connect to port 2380 succeeds.
+Link state uses hysteresis:
 
-Every poll interval the leader's agent builds a reachability view:
+- a link is **down** after `--threek-down-after` consecutive failed probes;
+- a link is **up** again after `--threek-up-after` consecutive successful probes.
 
-- its own row from the local member's `/metrics`;
-- every other voting member's row from that member's `/metrics` on its advertised client URL (port 2379, already open between members, same certificate as above).
+### Why not etcd's own transport state
+
+etcd exports `etcd_network_active_peers` per peer, and reading it would have avoided probing.
+It does not notice a blackholed peer: etcd sets the read timeout of its peer streams on a dialer that `net/http` ignores, so a stream to a peer that stopped answering stays "active" until TCP gives up on it, which takes minutes.
+The end-to-end tests showed exactly that, so threek measures reachability itself.
+
+### Sharing views
+
+The leader needs every member's view, not only its own.
+Each agent publishes its view in its member record (see [Member records](#member-records)), and the leader reads the records of the others from its local member:
+
+- its own row comes from its own probes in the current poll;
+- every other voting member's row comes from that member's record;
+- a member without a record has an unknown row and is never a transfer target.
 
 Targets come only from the local member's `MemberList`, learners excluded.
-Before using a member's row, the agent calls `Status` on the same URL and checks that the cluster ID and member ID in the response match.
+Only the leader also calls `Status` on the other members' client URLs, to check their health (see [Priorities](#priorities)) and that the cluster ID and member ID match.
+Every call to another member has its own one second timeout, so an unreachable member cannot use up the time the poll needs for local calls.
 
-Rules for reading the metric:
-
-- A missing series means inactive: etcd creates the series only after the first successful activation.
-- Series for members that are no longer in `MemberList` are ignored: etcd never deletes them.
-- An increase of `etcd_network_disconnected_peers_total` between two polls counts as an inactive sample, so short flaps between polls are not lost.
-- If a member's `/metrics` cannot be fetched in the current poll, its row is unknown. A member with an unknown row is never a transfer target.
-
-Link state uses hysteresis on top of etcd's own 5 s timeout:
-
-- a link is **down** after `--threek-down-after` consecutive inactive samples;
-- a link is **up** again after `--threek-up-after` consecutive active samples.
-
-Because every row is fetched by the leader's own agent at a locally known moment, view freshness never compares clocks of different machines.
-
-Followers' agents only read their own member; reading the other members is the leader's job.
-
-The member cut off from the leader never has to report anything.
-The leader learns that it cannot reach that member from its own row, and learns that the candidate reaches everyone from the candidate's row.
-A member that reaches everyone reaches the leader too, so the candidate's row is always readable when a transfer is needed.
-The only exception is a network that passes peer traffic (port 2380) but blocks client traffic (port 2379) between members: the candidate's row is then unknown and threek does nothing.
+The member cut off from the leader never has to report anything: the leader learns that it cannot reach that member from its own probes.
+The candidate reaches everyone, the leader included, so its record stays current.
+A member cut off from the quorum cannot renew its record, which expires; that member is never a candidate anyway.
 
 ## Member records
 
-For the preferred leader feature the leader must know the identity of every member.
-Each agent with an identity configured keeps a record in its own cluster:
+Each agent keeps one record in its own cluster:
 
 ```text
 key:   /threek/members/<member id, hex>
-value: {"schemaVersion": 1, "identity": "zone-c", "agentVersion": "v0.1.0"}
-lease: 30 s, kept alive by the agent
+value: {"schemaVersion": 1, "identity": "zone-c", "agentVersion": "v0.1.0",
+        "sees": {"<peer id, hex>": true, "<peer id, hex>": false}}
+lease: 10 s, renewed by every poll
 ```
 
-- The record is written once when the agent starts or when its lease is lost. Keep-alives are not Raft proposals, so steady state adds no writes.
-- A member cut off from the leader cannot keep its lease alive, and its record expires. This does not matter: the partition rule does not use identities.
-- Without `--threek-identity` the agent writes nothing.
+- The record is rewritten only when the view or the identity changes. Lease renewals are not Raft proposals, so a stable cluster adds no writes.
+- The lease is renewed by the poll loop itself, not by a background keep-alive, so the view of an agent that stopped polling expires within 10 s instead of staying stale.
+- The agent revokes the lease when it stops, which removes the record at once.
 - Kubernetes API servers only read keys under their `--etcd-prefix` (`/registry` by default), so the records are invisible to them. They do appear in snapshots and in `etcdctl get --prefix`.
 
 ## Decisions
@@ -174,7 +170,7 @@ It returns either "no action" or "transfer to member X, reason R".
 2. **Preferred leader.** Every link has been up for at least `--threek-prefer-after`, the local member is not the preferred one, exactly one voting member carries the preferred identity, and that member is healthy. Transfer to the preferred member.
 3. Otherwise, do nothing.
 
-A transfer target, under either rule, must be healthy: its `Status` call answers within the poll timeout, it reports no alarms, and its applied index is at most 1000 entries behind the leader's.
+A transfer target, under either rule, must be healthy: its `Status` call answers within one second, it reports no alarms, and its applied index is at most 1000 entries behind the leader's.
 A member busy with defragmentation blocks its backend, fails this check and is not chosen as a target.
 
 If several members share the preferred identity, the agent logs a warning and ignores the preference.
@@ -207,11 +203,11 @@ A ↔ B breaks at T, the leader is in A, C reaches both:
 
 | Time | Event |
 | --- | --- |
-| T + 5 s | etcd on A and B marks the peer inactive |
-| T + 8 s | the agent on A declares the A ↔ B link down (3 samples at 1 s) |
-| T + 23 s | `--threek-move-after` passes, A transfers leadership to C |
-| T + 24 s | B receives heartbeats from the new leader and serves again |
+| T + 3 s | the agent on A declares the A ↔ B link down (3 failed probes, one per second) |
+| T + 18 s | `--threek-move-after` passes, A transfers leadership to C |
+| T + 20 s | B receives heartbeats from the new leader and serves again |
 
+The end-to-end test measures about 20 s from the partition until B follows the new leader.
 All defaults are starting points and are to be tuned on a test bench.
 
 ## Configuration
@@ -223,9 +219,9 @@ The environment is meant for values that differ per member and come from the Kub
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--threek-mode` | `off` | `off`: plain etcd, no agent. `dry-run`: decide and log, never transfer. `enforce`: transfer. |
-| `--threek-poll-interval` | `1s` | how often the agent samples metrics and status |
-| `--threek-down-after` | `3` | consecutive inactive samples before a link is down |
-| `--threek-up-after` | `10` | consecutive active samples before a link is up |
+| `--threek-poll-interval` | `1s` | how often the agent probes its peers and polls etcd |
+| `--threek-down-after` | `3` | consecutive failed probes before a link is down |
+| `--threek-up-after` | `10` | consecutive successful probes before a link is up |
 | `--threek-move-after` | `15s` | how long a link stays down before a partition transfer |
 | `--threek-move-cooldown` | `2m` | minimum leadership tenure before this agent transfers leadership away |
 | `--threek-identity` | empty | label of this member: a zone or a node name, unique within the cluster |
@@ -290,9 +286,9 @@ The operator's restore init container runs from the same image, so the image mus
 
 ## Security
 
-- The agent listens on nothing by default. It only connects to client URLs of its own cluster's members.
-- It authenticates with the member's own server certificate and verifies peers with the member's own client CA. A member of another cluster signed by a different CA is rejected by TLS. Clusters that share a CA are told apart by the cluster ID check described in [Connectivity signal](#connectivity-signal).
-- The agent writes only under `/threek/members/`, and only when an identity is configured.
+- The agent listens on nothing by default. It only connects to the client and peer URLs of its own cluster's members.
+- It authenticates with the member's own certificates and verifies other members with the member's own CAs. A member of another cluster signed by a different CA is rejected by TLS. Clusters that share a CA are told apart by the cluster ID check described in [Sharing views](#sharing-views).
+- The agent writes only its own record under `/threek/members/`.
 - The optional metrics endpoint is plain HTTP and exposes no secrets. Bind it to a trusted address.
 
 ## Observability
@@ -323,7 +319,7 @@ Upgrade rules:
 - A field may be removed only in N+2, after N+1 stopped relying on it.
 - Patch releases never change the schema.
 
-threek also depends on etcd's metric names. Every supported etcd minor version is covered by the end-to-end tests.
+Every supported etcd minor version is covered by the integration and end-to-end tests.
 
 ## Testing
 
@@ -332,7 +328,10 @@ Every pull request runs:
 - **Unit tests** for the decision engine. It is a pure function, so each scenario from the table above is a table-driven case, including flapping, unknown rows, duplicate identities, learners and cooldown.
 - **Unit tests** for argument handling: every etcd flag syntax, `ETCD_*` environment, `--config-file`, removal of `--threek-*`.
 - **Supervisor tests**: signal forwarding, exit codes, `exec` for non-server invocations, agent crash isolation (etcd must survive).
-- **End-to-end tests**: three real etcd members in containers, partial partitions made with `iptables` drop rules. They assert that the leader moves within the expected time, that nothing moves on a full site failure, in `dry-run`, or on flapping, and that the preferred leader comes back after the partition heals. The suite runs against every supported etcd minor version.
+- **Integration tests** against real etcd processes with mTLS: the etcd client calls, the probes and the return to the preferred leader with three agents.
+- **End-to-end tests**: three members of the threek image in containers, run as Talos runs etcd, with links broken by `iptables` drop rules. They assert that the leader moves after a partial partition and that clients of the cut-off member can write again, that nothing moves on a site failure or in `dry-run`, and that the image exits like upstream etcd on stop.
+
+Integration and end-to-end tests run against every supported etcd minor version.
 
 After the first release, a version skew test runs agents of N and N+1 in one cluster.
 
@@ -352,10 +351,15 @@ Clients must reach members without crossing the partition, for example:
 etcd-operator transfers leadership away from a member before defragmenting it.
 With a preferred leader configured, threek does not return the leader to a member that fails the health check, and the cooldown delays any transfer after a leadership change.
 
-### etcd versions
+### Peer TLS
 
-The connectivity signal relies on `etcd_network_active_peers` and `etcd_network_disconnected_peers_total`, verified against the source of etcd v3.6 and v3.7.
-Every other supported version must pass the end-to-end suite.
+Peers must use TLS with a CA (`--peer-trusted-ca-file`) or plain HTTP.
+`--peer-auto-tls` is not supported: self-signed peer certificates cannot be verified, and the agent does not start.
+
+### What a probe checks
+
+A probe proves that the peer port accepts a TLS connection and answers HTTP within one second.
+It does not prove that Raft messages flow, for example through a path with a broken MTU that only drops large packets.
 
 ## Rejected alternatives
 
@@ -366,7 +370,8 @@ Every other supported version must pass the end-to-end suite.
 | etcd with PreVote disabled | endless elections between the two sides of the partition |
 | etcd fork with `ForgetLeader` | the same effect as an external `move-leader`, at the cost of maintaining a fork |
 | Sidecar or static pod next to etcd | a different mechanism per platform, separate credentials, changes to pod specs and network policies |
-| Agent-to-agent reports over a separate port | a new port in every firewall and network policy, a listening agent, and a TCP probe instead of the Raft-level signal |
+| Agent-to-agent reports over a separate port | a new port in every firewall and network policy and a listening agent; records in etcd carry the same reports over existing ports |
+| etcd's transport metrics (`etcd_network_active_peers`) | blind to blackholed peers for minutes, see [Why not etcd's own transport state](#why-not-etcds-own-transport-state) |
 | memberlist (SWIM) | its indirect probes deliberately hide partial partitions, which is exactly what threek has to detect |
 | Embedding etcd as a library | every etcd flag would have to be parsed exactly as etcd does, and etcd would have to be rebuilt for every release |
 
