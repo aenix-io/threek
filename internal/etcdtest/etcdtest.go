@@ -149,8 +149,23 @@ func (cl *Cluster) Client(t *testing.T, m *Member) *clientv3.Client {
 	return c
 }
 
-// Leader returns the member that currently leads, as seen by every member.
+// Leader returns the member that leads, once every member agrees on it.
+// Members briefly disagree while leadership moves.
 func (cl *Cluster) Leader(t *testing.T) *Member {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if leader, ok := cl.agreedLeader(t); ok {
+			return cl.ByID(t, leader)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("members do not agree on the leader")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (cl *Cluster) agreedLeader(t *testing.T) (uint64, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -160,12 +175,12 @@ func (cl *Cluster) Leader(t *testing.T) *Member {
 		if err != nil {
 			t.Fatalf("status of %s: %v", m.Name, err)
 		}
-		if leader != 0 && st.Leader != leader {
-			t.Fatalf("members disagree on the leader")
+		if st.Leader == 0 || leader != 0 && st.Leader != leader {
+			return 0, false
 		}
 		leader = st.Leader
 	}
-	return cl.ByID(t, leader)
+	return leader, true
 }
 
 // ID returns the member ID of m.
