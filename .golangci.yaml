@@ -18,7 +18,7 @@ linters:
       - std-error-handling
     rules:
       # Tests start helper processes and write temporary files on purpose.
-      - path: _test\.go
+      - path: (_test\.go|internal/etcdtest/)
         linters:
           - gosec
 
