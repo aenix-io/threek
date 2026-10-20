@@ -54,3 +54,26 @@ jobs:
       - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
           globs: "**/*.md"
+
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        etcd:
+          - v3.6.15
+          - v3.7.2
+    name: e2e (etcd ${{ matrix.etcd }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build image
+        env:
+          ETCD_VERSION: ${{ matrix.etcd }}
+        run: make image IMAGE=threek:e2e VERSION=e2e ETCD_VERSION="${ETCD_VERSION}"
+      - name: Run end-to-end tests
+        env:
+          E2E_IMAGE: threek:e2e
+        run: go test -tags e2e -timeout 20m -v ./test/e2e/
