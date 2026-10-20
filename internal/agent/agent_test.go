@@ -42,6 +42,7 @@ type fakeCluster struct {
 	puts        int
 	revoked     []int64
 	moveErr     error
+	localErr    error
 	moves       []uint64
 	statusCalls []string
 }
@@ -112,6 +113,10 @@ func (f *fakeCluster) Status(ctx context.Context, u string) (cluster.Status, err
 	f.mu.Lock()
 	f.statusCalls = append(f.statusCalls, u)
 	id := f.idOf(u)
+	if id == f.self && f.localErr != nil {
+		f.mu.Unlock()
+		return cluster.Status{}, f.localErr
+	}
 	if id != f.self && f.cut[[2]uint64{f.self, id}] {
 		f.mu.Unlock()
 		<-ctx.Done()

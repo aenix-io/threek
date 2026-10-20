@@ -70,12 +70,13 @@ func Run(ctx context.Context, cfg config.Config, settings etcdconf.Settings, log
 }
 
 type Agent struct {
-	cfg    config.Config
-	c      Cluster
-	prober Prober
-	logger *slog.Logger
-	now    func() time.Time
-	engine *engine.Engine
+	cfg     config.Config
+	c       Cluster
+	prober  Prober
+	logger  *slog.Logger
+	now     func() time.Time
+	engine  *engine.Engine
+	metrics *metrics
 
 	remoteTimeout time.Duration
 	pollTimeout   time.Duration
@@ -102,6 +103,7 @@ func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func()
 			Identity:        cfg.Identity,
 			PreferredLeader: cfg.PreferredLeader,
 		}),
+		metrics:       newMetrics(),
 		remoteTimeout: remoteTimeout,
 		pollTimeout:   pollTimeout,
 		lastLog:       map[string]string{},
@@ -111,6 +113,13 @@ func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func()
 // Run polls every PollInterval until ctx is done, then withdraws the
 // member's record.
 func (a *Agent) Run(ctx context.Context) error {
+	if a.cfg.MetricsListen != "" {
+		stop, err := a.metrics.serve(ctx, a.cfg.MetricsListen)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	a.logger.Info("agent started", "mode", a.cfg.Mode, "version", Version)
 	ticker := time.NewTicker(a.cfg.PollInterval)
 	defer ticker.Stop()
@@ -132,11 +141,21 @@ func (a *Agent) Tick(ctx context.Context) {
 	obs, err := a.observe(pollCtx)
 	cancel()
 	if err != nil {
+		a.metrics.pollFailures.Inc()
 		a.logChange("poll", slog.LevelWarn, "poll failed", err.Error(), "error", err)
 		return
 	}
 	delete(a.lastLog, "poll")
-	a.act(ctx, a.engine.Observe(obs))
+	d := a.engine.Observe(obs)
+	a.metrics.linkUp.Reset()
+	for _, l := range a.engine.Links() {
+		up := 0.0
+		if l.State == engine.LinkUp {
+			up = 1
+		}
+		a.metrics.linkUp.WithLabelValues(hex(uint64(l.From)), hex(uint64(l.To))).Set(up)
+	}
+	a.act(ctx, d)
 }
 
 func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
@@ -157,6 +176,11 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	}
 
 	leading := local.Leader == local.MemberID
+	if leading {
+		a.metrics.isLeader.Set(1)
+	} else {
+		a.metrics.isLeader.Set(0)
+	}
 	sees := map[uint64]bool{}
 	healthy := map[uint64]bool{local.MemberID: true}
 	remoteCtx, cancel := context.WithTimeout(ctx, a.remoteTimeout)
@@ -189,6 +213,7 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	if err != nil {
 		return engine.Observation{}, err
 	}
+	a.metrics.records.Set(float64(len(records)))
 
 	obs := engine.Observation{
 		Now:    a.now(),
@@ -310,7 +335,9 @@ func (a *Agent) act(ctx context.Context, d engine.Decision) {
 	}
 	attrs = append(attrs, "target", hex(uint64(d.Target)), "reason", d.Reason)
 	if a.cfg.Mode != config.ModeEnforce {
-		a.logChange("decision", slog.LevelInfo, "would transfer leadership", d.Note, attrs...)
+		if a.logChange("decision", slog.LevelInfo, "would transfer leadership", d.Note, attrs...) {
+			a.metrics.dryRunTransfers.WithLabelValues(string(d.Reason)).Inc()
+		}
 		return
 	}
 	delete(a.lastLog, "decision")
@@ -319,21 +346,25 @@ func (a *Agent) act(ctx context.Context, d engine.Decision) {
 	defer cancel()
 	if err := a.c.MoveLeader(moveCtx, uint64(d.Target)); err != nil {
 		a.engine.TransferFailed(a.now())
+		a.metrics.transfers.WithLabelValues(string(d.Reason), "failure").Inc()
 		a.logger.Error("leadership transfer failed", append(attrs, "error", err)...)
 		return
 	}
+	a.metrics.transfers.WithLabelValues(string(d.Reason), "success").Inc()
 	a.logger.Info("leadership transferred", attrs...)
 }
 
 // logChange logs msg only when key differs from the previous key logged in
-// the same category, so a situation that lasts is logged once.
-func (a *Agent) logChange(category string, level slog.Level, msg, key string, attrs ...any) {
+// the same category, so a situation that lasts is logged once. It reports
+// whether it logged.
+func (a *Agent) logChange(category string, level slog.Level, msg, key string, attrs ...any) bool {
 	key = msg + "\x00" + key
 	if a.lastLog[category] == key {
-		return
+		return false
 	}
 	a.lastLog[category] = key
 	a.logger.Log(context.Background(), level, msg, attrs...)
+	return true
 }
 
 func hex(id uint64) string {
