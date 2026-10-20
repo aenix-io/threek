@@ -35,7 +35,8 @@ Expected reaction time with the defaults is about 25 seconds from the link failu
 ## Requirements and limitations
 
 - Exactly three voting members. Learners are ignored.
-- etcd without authentication (`auth enable` is not supported).
+- Client certificate authentication (mTLS) is supported and expected.
+  etcd authentication (`etcdctl auth enable`, `spec.auth` in etcd-operator) is not supported: `MoveLeader` requires the root role.
 - Client and peer TLS as configured by Talos or etcd-operator: the agent reuses etcd's own certificates.
 - Synchronized clocks on all members, as etcd itself expects.
 - Clients must not be routed across the partition. threek restores a leader for every member, but a client in one site that is load-balanced to a member in an unreachable site still fails. Use topology-aware routing (for example `trafficDistribution: PreferSameZone`) or list every member in the client configuration.

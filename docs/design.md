@@ -46,7 +46,7 @@ Non-goals:
 - clusters with more or fewer than three voting members;
 - full site failures and full partitions, which Raft already handles;
 - routing etcd clients around a partition (see [Client routing](#client-routing));
-- etcd with authentication enabled (`etcdctl auth enable`).
+- etcd authentication (`etcdctl auth enable`, `spec.auth` in etcd-operator): `MoveLeader` requires the root role, and the agent connects with a certificate that maps to no etcd user. Client certificate authentication (mTLS) alone is supported.
 
 ## The rule
 
