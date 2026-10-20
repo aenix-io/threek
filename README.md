@@ -2,7 +2,7 @@
 
 A drop-in etcd supervisor that keeps the Raft leader on a member every other member can reach.
 
-> **Status:** design stage. Nothing is implemented yet. See [docs/design.md](docs/design.md).
+> **Status:** early development, not usable yet. The supervisor and the decision engine are implemented; the agent does not talk to etcd yet. See [docs/design.md](docs/design.md).
 
 ## The problem
 
@@ -75,6 +75,14 @@ Every flag can also be set through an environment variable (`--threek-mode` ↔ 
 The supervisor removes `--threek-*` flags and `THREEK_*` variables before starting etcd.
 
 With `--threek-mode=off` the image behaves exactly like upstream etcd, so rolling back is a flag change.
+
+## Development
+
+```bash
+make test   # unit and integration tests
+make lint   # golangci-lint
+make build  # bin/threek
+```
 
 ## License
 

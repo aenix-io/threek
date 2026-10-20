@@ -1,6 +1,6 @@
 # threek design
 
-Status: draft, nothing is implemented yet.
+Status: draft. The supervisor and the decision engine are implemented; the agent's etcd I/O is not.
 
 ## Problem
 
@@ -78,7 +78,7 @@ The image runs as an unprivileged user and needs no capabilities.
 ```text
 /usr/local/bin/etcd (supervisor)
 ├── etcd-upstream <original argv without --threek-*>
-└── etcd agent    (same binary, hidden subcommand)
+└── threek-agent  (same binary, started with argv[0] = threek-agent)
 ```
 
 The supervisor is kept minimal, because a crash of it is a crash of the etcd member.
@@ -86,11 +86,13 @@ All logic lives in the agent, a separate process. A panic, a fatal runtime error
 
 Supervisor behavior:
 
-1. `--threek-mode=off`, or a non-server invocation (`--version`, `--help`, the `gateway` and `grpc-proxy` subcommands): `exec` the upstream binary directly. The process becomes plain etcd.
-2. Otherwise start upstream etcd with the original argv, minus `--threek-*` flags, and the original environment, minus `THREEK_*` variables.
-3. Forward termination signals to etcd. When etcd exits, stop the agent and exit with etcd's exit code. Restarting is left to whoever restarts etcd today (Talos, kubelet).
-4. When the agent exits, restart it with exponential backoff. etcd keeps running.
-5. Write nothing to stdout. Supervisor and agent log JSON to stderr with a `"logger":"threek"` field, so they can be told apart from etcd's own log lines.
+1. Invalid threek settings: exit with code 2 without starting etcd, as etcd does for invalid flags.
+2. `--threek-mode=off`, or a non-server invocation (`--version`, `--help`, the `gateway` and `grpc-proxy` subcommands): `exec` the upstream binary directly. The process becomes plain etcd.
+3. Otherwise start upstream etcd with the original argv, minus `--threek-*` flags, and the original environment, minus `THREEK_*` variables.
+4. Forward signals to etcd. When etcd exits, stop the agent and end the way etcd ended: with its exit code, or by the signal that killed it. Restarting is left to whoever restarts etcd today (Talos, kubelet).
+   After a graceful shutdown on SIGINT or SIGTERM etcd kills itself with the same signal, except as PID 1, where it exits with code 0. The supervisor is PID 1 in a container, so it applies that rule in etcd's place.
+5. When the agent exits, restart it with exponential backoff. etcd keeps running.
+6. Write nothing to stdout. Supervisor and agent log JSON to stderr with a `"logger":"threek"` field, so they can be told apart from etcd's own log lines.
 
 ### Reading etcd settings
 
