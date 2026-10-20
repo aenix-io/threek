@@ -102,8 +102,12 @@ func run(t *testing.T, s *Supervisor) int {
 	}
 	done := make(chan result, 1)
 	go func() {
-		code, err := s.Run()
-		done <- result{code, err}
+		state, err := s.Run()
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		done <- result{code: ExitCode(state)}
 	}()
 	select {
 	case r := <-done:

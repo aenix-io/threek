@@ -43,9 +43,8 @@ type Supervisor struct {
 	AgentStopTimeout time.Duration
 }
 
-// Run starts etcd and the agent and returns etcd's exit code once etcd exits.
-// A process killed by signal N is reported as 128+N, as shells do.
-func (s *Supervisor) Run() (int, error) {
+// Run starts etcd and the agent and returns etcd's state once etcd exits.
+func (s *Supervisor) Run() (*os.ProcessState, error) {
 	if s.AgentBackoff == (Backoff{}) {
 		s.AgentBackoff = Backoff{Initial: time.Second, Max: time.Minute}
 	}
@@ -55,7 +54,7 @@ func (s *Supervisor) Run() (int, error) {
 
 	ownProcessGroup(s.Etcd)
 	if err := s.Etcd.Start(); err != nil {
-		return 0, fmt.Errorf("start etcd: %w", err)
+		return nil, fmt.Errorf("start etcd: %w", err)
 	}
 	etcdDone := make(chan error, 1)
 	go func() { etcdDone <- s.Etcd.Wait() }()
@@ -102,7 +101,7 @@ func (s *Supervisor) Run() (int, error) {
 				s.Logger.Error("wait for etcd", "error", err)
 			}
 			s.stopAgent(agent, agentDone)
-			return exitCode(s.Etcd.ProcessState), nil
+			return s.Etcd.ProcessState, nil
 		case err := <-agentDone:
 			s.Logger.Error("agent exited", "error", err)
 			agent, agentDone = nil, nil
@@ -139,7 +138,9 @@ func ownProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
-func exitCode(state *os.ProcessState) int {
+// ExitCode returns the exit code of a finished process. A process killed by
+// signal N is reported as 128+N, as shells do.
+func ExitCode(state *os.ProcessState) int {
 	if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		return 128 + int(ws.Signal())
 	}
