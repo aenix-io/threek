@@ -193,12 +193,20 @@ func TestRecords(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Errorf("KeepRecord() error = %v, want context.Canceled", err)
 	}
-	records, err := reader.Records(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := records[id]; ok {
-		t.Error("record is still present after KeepRecord returned")
+	// Serializable reads on another member may briefly lag behind the revoke.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		records, err := reader.Records(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := records[id]; !ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("record is still present after KeepRecord returned")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
