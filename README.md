@@ -14,6 +14,25 @@ The member in B loses the leader and asks for an election, but C refuses to vote
 This is how PreVote and CheckQuorum are supposed to work: they protect Raft from disruptive elections.
 The member in B stays leaderless for as long as the partition lasts, and every client attached to it fails.
 
+```mermaid
+sequenceDiagram
+    participant CL as Clients in site B
+    participant B as etcd in site B
+    participant C as etcd in site C
+    participant A as Leader in site A
+
+    Note over B,A: The link between A and B breaks
+    A->>C: heartbeat
+    A-xB: heartbeat is lost
+    loop every election timeout
+        B->>C: pre-vote request
+        C-->>B: rejected: leader A is alive
+    end
+    Note over B: Stays leaderless while the partition lasts
+    CL->>B: request
+    B-->>CL: error: no leader
+```
+
 The fix is a manual `etcdctl move-leader` to the member in C. threek does it automatically.
 
 ## How it works
