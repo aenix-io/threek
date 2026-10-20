@@ -43,6 +43,7 @@ type fakeCluster struct {
 	revoked     []int64
 	moveErr     error
 	localErr    error
+	hang        chan struct{}
 	moves       []uint64
 	statusCalls []string
 }
@@ -116,6 +117,12 @@ func (f *fakeCluster) Status(ctx context.Context, u string) (cluster.Status, err
 	if id == f.self && f.localErr != nil {
 		f.mu.Unlock()
 		return cluster.Status{}, f.localErr
+	}
+	if f.hang != nil {
+		hang := f.hang
+		f.mu.Unlock()
+		<-hang
+		f.mu.Lock()
 	}
 	if id != f.self && f.cut[[2]uint64{f.self, id}] {
 		f.mu.Unlock()

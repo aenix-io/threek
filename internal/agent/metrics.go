@@ -21,6 +21,7 @@ type metrics struct {
 	dryRunTransfers *prometheus.CounterVec
 	records         prometheus.Gauge
 	pollFailures    prometheus.Counter
+	lastPoll        prometheus.Gauge
 }
 
 func newMetrics() *metrics {
@@ -50,9 +51,13 @@ func newMetrics() *metrics {
 			Name: "threek_poll_failures_total",
 			Help: "Polls that could not read the local member.",
 		}),
+		lastPoll: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "threek_last_poll_timestamp_seconds",
+			Help: "Unix time of the last successful poll.",
+		}),
 	}
 	m.registry.MustRegister(
-		m.linkUp, m.isLeader, m.transfers, m.dryRunTransfers, m.records, m.pollFailures,
+		m.linkUp, m.isLeader, m.transfers, m.dryRunTransfers, m.records, m.pollFailures, m.lastPoll,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

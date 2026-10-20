@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aenix-io/threek/internal/cluster"
@@ -30,7 +32,11 @@ const (
 	// lease is renewed by the poll loop itself.
 	recordTTL       = 10 * time.Second
 	transferTimeout = 30 * time.Second
-	revokeTimeout   = 2 * time.Second
+	// stallTimeout is how long the poll loop may go without completing a poll
+	// before the agent exits for the supervisor to restart it. Every call in
+	// a poll has a timeout, so only a bug can get near it.
+	stallTimeout  = 30 * time.Second
+	revokeTimeout = 2 * time.Second
 	// maxAppliedLag is how far behind the leader a member may be and still be
 	// a transfer target. It is far above the lag of a member keeping up over
 	// a WAN link, and far below that of a member stalled by defragmentation.
@@ -80,6 +86,10 @@ type Agent struct {
 
 	remoteTimeout time.Duration
 	pollTimeout   time.Duration
+	stallTimeout  time.Duration
+	exit          func(code int)
+	started       time.Time
+	lastLoop      atomic.Int64
 
 	self      uint64
 	lease     int64
@@ -106,6 +116,9 @@ func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func()
 		metrics:       newMetrics(),
 		remoteTimeout: remoteTimeout,
 		pollTimeout:   pollTimeout,
+		stallTimeout:  stallTimeout,
+		exit:          os.Exit,
+		started:       time.Now(),
 		lastLog:       map[string]string{},
 	}
 }
@@ -121,15 +134,48 @@ func (a *Agent) Run(ctx context.Context) error {
 		defer stop()
 	}
 	a.logger.Info("agent started", "mode", a.cfg.Mode, "version", Version)
+	a.markLoop()
+	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
+	var watchdog sync.WaitGroup
+	watchdog.Go(func() { a.watchdog(watchdogCtx) })
+	defer watchdog.Wait()
+	defer stopWatchdog()
+
 	ticker := time.NewTicker(a.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
 		a.Tick(ctx)
+		a.markLoop()
 		select {
 		case <-ctx.Done():
 			a.withdraw(ctx)
 			return nil
 		case <-ticker.C:
+		}
+	}
+}
+
+func (a *Agent) markLoop() {
+	a.lastLoop.Store(int64(time.Since(a.started)))
+}
+
+// watchdog ends the process when the poll loop stops making progress. A
+// stalled agent never touches etcd, but it silently stops protecting it; the
+// supervisor restarts an agent that exits.
+func (a *Agent) watchdog(ctx context.Context) {
+	ticker := time.NewTicker(a.stallTimeout / 4)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stalled := time.Since(a.started) - time.Duration(a.lastLoop.Load())
+			if stalled > a.stallTimeout {
+				a.logger.Error("agent stalled, exiting", "stalled", stalled.String())
+				a.exit(1)
+				return
+			}
 		}
 	}
 }
@@ -146,6 +192,7 @@ func (a *Agent) Tick(ctx context.Context) {
 		return
 	}
 	delete(a.lastLog, "poll")
+	a.metrics.lastPoll.Set(float64(obs.Now.Unix()))
 	d := a.engine.Observe(obs)
 	a.metrics.linkUp.Reset()
 	for _, l := range a.engine.Links() {
