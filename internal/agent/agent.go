@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,16 +15,22 @@ import (
 	"github.com/aenix-io/threek/internal/config"
 	"github.com/aenix-io/threek/internal/engine"
 	"github.com/aenix-io/threek/internal/etcdconf"
-	"github.com/aenix-io/threek/internal/peermetrics"
+	"github.com/aenix-io/threek/internal/probe"
 )
 
 // Version is the agent version published in member records, set at build time.
 var Version = "dev"
 
 const (
-	recordTTL       = 30 * time.Second
-	recordRetry     = 5 * time.Second
+	// remoteTimeout bounds every call to another member, so an unreachable
+	// one cannot use up the time the poll needs for local calls.
+	remoteTimeout = time.Second
+	pollTimeout   = 3 * time.Second
+	// recordTTL bounds how long a stalled agent's view stays visible: the
+	// lease is renewed by the poll loop itself.
+	recordTTL       = 10 * time.Second
 	transferTimeout = 30 * time.Second
+	revokeTimeout   = 2 * time.Second
 	// maxAppliedLag is how far behind the leader a member may be and still be
 	// a transfer target. It is far above the lag of a member keeping up over
 	// a WAN link, and far below that of a member stalled by defragmentation.
@@ -34,10 +42,16 @@ type Cluster interface {
 	LocalURL() string
 	Status(ctx context.Context, url string) (cluster.Status, error)
 	Members(ctx context.Context) ([]cluster.Member, error)
-	Metrics(ctx context.Context, url string, id uint64) (peermetrics.Peers, error)
 	Records(ctx context.Context) (map[uint64]cluster.Record, error)
 	MoveLeader(ctx context.Context, target uint64) error
-	KeepRecord(ctx context.Context, id uint64, r cluster.Record, ttl time.Duration) error
+	GrantLease(ctx context.Context, ttl time.Duration) (int64, error)
+	PutRecord(ctx context.Context, id uint64, r cluster.Record, lease int64) error
+	RenewLease(ctx context.Context, lease int64) error
+	RevokeLease(ctx context.Context, lease int64) error
+}
+
+type Prober interface {
+	Reachable(ctx context.Context, peerURLs []string) bool
 }
 
 // Run connects to the local member and runs the agent until ctx is done.
@@ -47,25 +61,36 @@ func Run(ctx context.Context, cfg config.Config, settings etcdconf.Settings, log
 		return err
 	}
 	defer c.Close()
-	return New(cfg, c, logger, time.Now).Run(ctx)
+	p, err := probe.New(settings, remoteTimeout)
+	if err != nil {
+		return err
+	}
+	defer p.Close()
+	return New(cfg, c, p, logger, time.Now).Run(ctx)
 }
 
 type Agent struct {
 	cfg    config.Config
 	c      Cluster
+	prober Prober
 	logger *slog.Logger
 	now    func() time.Time
 	engine *engine.Engine
 
-	self    uint64
-	prev    map[uint64]peermetrics.Peers
-	lastLog string
+	remoteTimeout time.Duration
+	pollTimeout   time.Duration
+
+	self      uint64
+	lease     int64
+	published *cluster.Record
+	lastLog   map[string]string
 }
 
-func New(cfg config.Config, c Cluster, logger *slog.Logger, now func() time.Time) *Agent {
+func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func() time.Time) *Agent {
 	return &Agent{
 		cfg:    cfg,
 		c:      c,
+		prober: p,
 		logger: logger,
 		now:    now,
 		engine: engine.New(engine.Params{
@@ -77,41 +102,40 @@ func New(cfg config.Config, c Cluster, logger *slog.Logger, now func() time.Time
 			Identity:        cfg.Identity,
 			PreferredLeader: cfg.PreferredLeader,
 		}),
-		prev: map[uint64]peermetrics.Peers{},
+		remoteTimeout: remoteTimeout,
+		pollTimeout:   pollTimeout,
+		lastLog:       map[string]string{},
 	}
 }
 
-// Run polls every PollInterval until ctx is done.
+// Run polls every PollInterval until ctx is done, then withdraws the
+// member's record.
 func (a *Agent) Run(ctx context.Context) error {
 	a.logger.Info("agent started", "mode", a.cfg.Mode, "version", Version)
 	ticker := time.NewTicker(a.cfg.PollInterval)
 	defer ticker.Stop()
-	var records sync.WaitGroup
-	defer records.Wait()
-	recordStarted := false
 	for {
 		a.Tick(ctx)
-		if !recordStarted && a.self != 0 && a.cfg.Identity != "" {
-			recordStarted = true
-			records.Go(func() { a.keepRecord(ctx, a.self) })
-		}
 		select {
 		case <-ctx.Done():
+			a.withdraw(ctx)
 			return nil
 		case <-ticker.C:
 		}
 	}
 }
 
-// Tick polls the cluster once and acts on the decision.
+// Tick polls the cluster once, publishes the local view and acts on the
+// decision.
 func (a *Agent) Tick(ctx context.Context) {
-	pollCtx, cancel := context.WithTimeout(ctx, max(a.cfg.PollInterval, time.Second))
+	pollCtx, cancel := context.WithTimeout(ctx, a.pollTimeout)
 	obs, err := a.observe(pollCtx)
 	cancel()
 	if err != nil {
-		a.logChange(slog.LevelWarn, "poll failed", err.Error(), "error", err)
+		a.logChange("poll", slog.LevelWarn, "poll failed", err.Error(), "error", err)
 		return
 	}
+	delete(a.lastLog, "poll")
 	a.act(ctx, a.engine.Observe(obs))
 }
 
@@ -125,11 +149,45 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	if err != nil {
 		return engine.Observation{}, err
 	}
-	records := map[uint64]cluster.Record{}
-	if a.cfg.PreferredLeader != "" {
-		if records, err = a.c.Records(ctx); err != nil {
-			return engine.Observation{}, err
+	var voters []cluster.Member
+	for _, m := range members {
+		if !m.IsLearner {
+			voters = append(voters, m)
 		}
+	}
+
+	leading := local.Leader == local.MemberID
+	sees := map[uint64]bool{}
+	healthy := map[uint64]bool{local.MemberID: true}
+	remoteCtx, cancel := context.WithTimeout(ctx, a.remoteTimeout)
+	defer cancel()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, m := range voters {
+		if m.ID == local.MemberID {
+			continue
+		}
+		wg.Go(func() {
+			reachable := a.prober.Reachable(remoteCtx, m.PeerURLs)
+			mu.Lock()
+			defer mu.Unlock()
+			sees[m.ID] = reachable
+		})
+		if leading {
+			wg.Go(func() {
+				ok := a.healthy(remoteCtx, m, local)
+				mu.Lock()
+				defer mu.Unlock()
+				healthy[m.ID] = ok
+			})
+		}
+	}
+	wg.Wait()
+
+	a.publish(ctx, sees)
+	records, err := a.c.Records(ctx)
+	if err != nil {
+		return engine.Observation{}, err
 	}
 
 	obs := engine.Observation{
@@ -137,48 +195,21 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		Self:   engine.MemberID(local.MemberID),
 		Leader: engine.MemberID(local.Leader),
 		Term:   local.Term,
-		Active: map[engine.MemberID]map[engine.MemberID]bool{},
+		Active: map[engine.MemberID]map[engine.MemberID]bool{engine.MemberID(local.MemberID): row(sees)},
 	}
-	var voters []cluster.Member
-	for _, m := range members {
-		if !m.IsLearner {
-			voters = append(voters, m)
-			obs.Members = append(obs.Members, engine.Member{ID: engine.MemberID(m.ID), Identity: records[m.ID].Identity})
+	for _, m := range voters {
+		r := records[m.ID]
+		obs.Members = append(obs.Members, engine.Member{ID: engine.MemberID(m.ID), Identity: r.Identity, Healthy: healthy[m.ID]})
+		if _, ok := records[m.ID]; ok && m.ID != local.MemberID {
+			obs.Active[engine.MemberID(m.ID)] = recordRow(r)
 		}
 	}
-
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	leading := local.Leader == local.MemberID
-	for i, m := range voters {
-		if m.ID != local.MemberID && !leading {
-			continue
-		}
-		wg.Go(func() {
-			peers, healthy, ok := a.inspect(ctx, m, local)
-			mu.Lock()
-			defer mu.Unlock()
-			obs.Members[i].Healthy = healthy
-			if ok {
-				obs.Active[engine.MemberID(m.ID)] = a.row(m.ID, peers)
-			}
-		})
-	}
-	wg.Wait()
 	return obs, nil
 }
 
-// inspect reads member m's view of its peers and whether it is a healthy
-// transfer target. ok is false when the view could not be read.
-func (a *Agent) inspect(ctx context.Context, m cluster.Member, local cluster.Status) (peers peermetrics.Peers, healthy, ok bool) {
-	if m.ID == local.MemberID {
-		peers, err := a.c.Metrics(ctx, a.c.LocalURL(), m.ID)
-		if err != nil {
-			a.logger.Debug("read own metrics", "error", err)
-			return peermetrics.Peers{}, true, false
-		}
-		return peers, true, true
-	}
+// healthy reports whether member m belongs to the local cluster and can take
+// over leadership.
+func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) bool {
 	for _, url := range m.ClientURLs {
 		st, err := a.c.Status(ctx, url)
 		if err != nil {
@@ -190,25 +221,82 @@ func (a *Agent) inspect(ctx context.Context, m cluster.Member, local cluster.Sta
 				"cluster", hex(st.ClusterID), "answered", hex(st.MemberID))
 			continue
 		}
-		peers, err := a.c.Metrics(ctx, url, m.ID)
-		if err != nil {
-			a.logger.Debug("member metrics", "member", hex(m.ID), "url", url, "error", err)
-			continue
-		}
 		lag := local.AppliedIndex - min(local.AppliedIndex, st.AppliedIndex)
-		return peers, len(st.Errors) == 0 && lag <= maxAppliedLag, true
+		return len(st.Errors) == 0 && lag <= maxAppliedLag
 	}
-	return peermetrics.Peers{}, false, false
+	return false
 }
 
-func (a *Agent) row(id uint64, peers peermetrics.Peers) map[engine.MemberID]bool {
-	active := peers.ActiveSince(a.prev[id])
-	a.prev[id] = peers
-	row := make(map[engine.MemberID]bool, len(active))
-	for peer, up := range active {
-		row[engine.MemberID(peer)] = up
+// publish keeps the member's record current. The lease is renewed on every
+// poll, so the record expires when the agent stops polling; the record is
+// rewritten only when the view changes.
+func (a *Agent) publish(ctx context.Context, sees map[uint64]bool) {
+	r := cluster.Record{
+		SchemaVersion: cluster.RecordSchemaVersion,
+		Identity:      a.cfg.Identity,
+		AgentVersion:  Version,
+		Sees:          map[string]bool{},
 	}
-	return row
+	for id, ok := range sees {
+		r.Sees[hex(id)] = ok
+	}
+
+	if a.lease != 0 {
+		err := a.c.RenewLease(ctx, a.lease)
+		switch {
+		case errors.Is(err, cluster.ErrLeaseExpired):
+			a.lease, a.published = 0, nil
+		case err != nil:
+			a.logChange("publish", slog.LevelWarn, "renew member record", err.Error(), "error", err)
+			return
+		}
+	}
+	if a.lease == 0 {
+		lease, err := a.c.GrantLease(ctx, recordTTL)
+		if err != nil {
+			a.logChange("publish", slog.LevelWarn, "publish member record", err.Error(), "error", err)
+			return
+		}
+		a.lease = lease
+	}
+	if a.published != nil && maps.Equal(a.published.Sees, r.Sees) {
+		return
+	}
+	if err := a.c.PutRecord(ctx, a.self, r, a.lease); err != nil {
+		a.logChange("publish", slog.LevelWarn, "publish member record", err.Error(), "error", err)
+		return
+	}
+	a.published = &r
+	a.logChange("publish", slog.LevelInfo, "member record published", fmt.Sprint(r.Sees), "sees", r.Sees)
+}
+
+func (a *Agent) withdraw(ctx context.Context) {
+	if a.lease == 0 {
+		return
+	}
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	if err := a.c.RevokeLease(revokeCtx, a.lease); err != nil {
+		a.logger.Warn("withdraw member record", "error", err)
+	}
+}
+
+func row(sees map[uint64]bool) map[engine.MemberID]bool {
+	r := make(map[engine.MemberID]bool, len(sees))
+	for id, ok := range sees {
+		r[engine.MemberID(id)] = ok
+	}
+	return r
+}
+
+func recordRow(r cluster.Record) map[engine.MemberID]bool {
+	out := make(map[engine.MemberID]bool, len(r.Sees))
+	for key, ok := range r.Sees {
+		if id, err := strconv.ParseUint(key, 16, 64); err == nil {
+			out[engine.MemberID(id)] = ok
+		}
+	}
+	return out
 }
 
 func (a *Agent) act(ctx context.Context, d engine.Decision) {
@@ -217,15 +305,15 @@ func (a *Agent) act(ctx context.Context, d engine.Decision) {
 		attrs = append(attrs, "wait", d.Wait.String())
 	}
 	if !d.Transfer {
-		a.logChange(slog.LevelInfo, "decision", d.Note, attrs...)
+		a.logChange("decision", slog.LevelInfo, "decision", d.Note, attrs...)
 		return
 	}
 	attrs = append(attrs, "target", hex(uint64(d.Target)), "reason", d.Reason)
 	if a.cfg.Mode != config.ModeEnforce {
-		a.logChange(slog.LevelInfo, "would transfer leadership", d.Note, attrs...)
+		a.logChange("decision", slog.LevelInfo, "would transfer leadership", d.Note, attrs...)
 		return
 	}
-	a.lastLog = ""
+	delete(a.lastLog, "decision")
 	a.logger.Info("transferring leadership", attrs...)
 	moveCtx, cancel := context.WithTimeout(ctx, transferTimeout)
 	defer cancel()
@@ -237,31 +325,15 @@ func (a *Agent) act(ctx context.Context, d engine.Decision) {
 	a.logger.Info("leadership transferred", attrs...)
 }
 
-// logChange logs only when key differs from the previous call's, so a
-// situation that lasts is logged once.
-func (a *Agent) logChange(level slog.Level, msg, key string, attrs ...any) {
+// logChange logs msg only when key differs from the previous key logged in
+// the same category, so a situation that lasts is logged once.
+func (a *Agent) logChange(category string, level slog.Level, msg, key string, attrs ...any) {
 	key = msg + "\x00" + key
-	if key == a.lastLog {
+	if a.lastLog[category] == key {
 		return
 	}
-	a.lastLog = key
+	a.lastLog[category] = key
 	a.logger.Log(context.Background(), level, msg, attrs...)
-}
-
-func (a *Agent) keepRecord(ctx context.Context, self uint64) {
-	r := cluster.Record{SchemaVersion: cluster.RecordSchemaVersion, Identity: a.cfg.Identity, AgentVersion: Version}
-	for {
-		err := a.c.KeepRecord(ctx, self, r, recordTTL)
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			return
-		}
-		a.logger.Warn("member record", "error", err)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(recordRetry):
-		}
-	}
 }
 
 func hex(id uint64) string {

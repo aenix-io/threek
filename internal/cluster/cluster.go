@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +19,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/aenix-io/threek/internal/etcdconf"
-	"github.com/aenix-io/threek/internal/peermetrics"
 )
 
 const (
@@ -32,7 +29,10 @@ const (
 	dialTimeout = 5 * time.Second
 )
 
-var ErrNotLeader = errors.New("local member is not the leader")
+var (
+	ErrNotLeader    = errors.New("local member is not the leader")
+	ErrLeaseExpired = errors.New("lease expired")
+)
 
 type Status struct {
 	ClusterID    uint64
@@ -47,6 +47,7 @@ type Member struct {
 	ID         uint64
 	Name       string
 	ClientURLs []string
+	PeerURLs   []string
 	IsLearner  bool
 }
 
@@ -54,8 +55,11 @@ type Member struct {
 // fields, so newer agents may add fields within a minor version.
 type Record struct {
 	SchemaVersion int    `json:"schemaVersion"`
-	Identity      string `json:"identity"`
+	Identity      string `json:"identity,omitempty"`
 	AgentVersion  string `json:"agentVersion,omitempty"`
+	// Sees reports whether this member reaches each peer, keyed by the peer's
+	// member ID in hex.
+	Sees map[string]bool `json:"sees,omitempty"`
 }
 
 // Client keeps one connection per member and authenticates with the local
@@ -63,7 +67,6 @@ type Record struct {
 type Client struct {
 	localURL string
 	tls      *tls.Config
-	http     *http.Client
 
 	mu      sync.Mutex
 	clients map[string]*clientv3.Client
@@ -87,7 +90,6 @@ func New(s etcdconf.Settings) (*Client, error) {
 	return &Client{
 		localURL: localURL,
 		tls:      tlsConfig,
-		http:     &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}},
 		clients:  map[string]*clientv3.Client{},
 	}, nil
 }
@@ -104,7 +106,6 @@ func (c *Client) Close() error {
 		errs = append(errs, cli.Close())
 	}
 	c.clients = map[string]*clientv3.Client{}
-	c.http.CloseIdleConnections()
 	return errors.Join(errs...)
 }
 
@@ -165,41 +166,11 @@ func (c *Client) Members(ctx context.Context) ([]Member, error) {
 			ID:         m.GetID(),
 			Name:       m.GetName(),
 			ClientURLs: m.GetClientURLs(),
+			PeerURLs:   m.GetPeerURLs(),
 			IsLearner:  m.GetIsLearner(),
 		})
 	}
 	return members, nil
-}
-
-// Metrics reads the transport state of member id from its /metrics endpoint
-// at url.
-func (c *Client) Metrics(ctx context.Context, url string, id uint64) (peermetrics.Peers, error) {
-	endpoint, err := metricsURL(url)
-	if err != nil {
-		return peermetrics.Peers{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-	if err != nil {
-		return peermetrics.Peers{}, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return peermetrics.Peers{}, fmt.Errorf("metrics of %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return peermetrics.Peers{}, fmt.Errorf("metrics of %s: %s", url, resp.Status)
-	}
-	return peermetrics.Parse(resp.Body, id)
-}
-
-func metricsURL(clientURL string) (string, error) {
-	u, err := url.Parse(clientURL)
-	if err != nil {
-		return "", fmt.Errorf("parse client URL: %w", err)
-	}
-	u.Path = "/metrics"
-	return u.String(), nil
 }
 
 // MoveLeader transfers leadership from the local member to target. It
@@ -248,11 +219,21 @@ func recordKey(id uint64) string {
 	return RecordPrefix + strconv.FormatUint(id, 16)
 }
 
-// KeepRecord publishes r for member id under a lease of the given TTL and
-// keeps it alive until ctx is done, then revokes it. It returns ctx's error,
-// or another error when the record cannot be published or the lease is lost;
-// the caller retries.
-func (c *Client) KeepRecord(ctx context.Context, id uint64, r Record, ttl time.Duration) error {
+// GrantLease grants a lease for member records.
+func (c *Client) GrantLease(ctx context.Context, ttl time.Duration) (int64, error) {
+	cli, err := c.client(c.localURL)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := cli.Grant(ctx, int64(ttl/time.Second))
+	if err != nil {
+		return 0, fmt.Errorf("grant record lease: %w", err)
+	}
+	return int64(resp.ID), nil
+}
+
+// PutRecord publishes r for member id under lease.
+func (c *Client) PutRecord(ctx context.Context, id uint64, r Record, lease int64) error {
 	cli, err := c.client(c.localURL)
 	if err != nil {
 		return err
@@ -261,26 +242,36 @@ func (c *Client) KeepRecord(ctx context.Context, id uint64, r Record, ttl time.D
 	if err != nil {
 		return err
 	}
-	lease, err := cli.Grant(ctx, int64(ttl/time.Second))
-	if err != nil {
-		return fmt.Errorf("grant record lease: %w", err)
-	}
-	defer func() {
-		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dialTimeout)
-		defer cancel()
-		_, _ = cli.Revoke(revokeCtx, lease.ID)
-	}()
-	if _, err := cli.Put(ctx, recordKey(id), string(value), clientv3.WithLease(lease.ID)); err != nil {
+	if _, err := cli.Put(ctx, recordKey(id), string(value), clientv3.WithLease(clientv3.LeaseID(lease))); err != nil {
 		return fmt.Errorf("put member record: %w", err)
 	}
-	alive, err := cli.KeepAlive(ctx, lease.ID)
+	return nil
+}
+
+// RenewLease extends lease once. It returns ErrLeaseExpired when the lease
+// no longer exists.
+func (c *Client) RenewLease(ctx context.Context, lease int64) error {
+	cli, err := c.client(c.localURL)
 	if err != nil {
-		return fmt.Errorf("keep record lease alive: %w", err)
+		return err
 	}
-	for range alive {
+	if _, err := cli.KeepAliveOnce(ctx, clientv3.LeaseID(lease)); err != nil {
+		if errors.Is(err, rpctypes.ErrLeaseNotFound) {
+			return ErrLeaseExpired
+		}
+		return fmt.Errorf("renew record lease: %w", err)
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+	return nil
+}
+
+// RevokeLease revokes lease, deleting the records attached to it.
+func (c *Client) RevokeLease(ctx context.Context, lease int64) error {
+	cli, err := c.client(c.localURL)
+	if err != nil {
+		return err
 	}
-	return errors.New("record lease lost")
+	if _, err := cli.Revoke(ctx, clientv3.LeaseID(lease)); err != nil {
+		return fmt.Errorf("revoke record lease: %w", err)
+	}
+	return nil
 }

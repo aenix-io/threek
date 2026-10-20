@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -60,8 +61,8 @@ func TestStatusAndMembers(t *testing.T) {
 		t.Fatalf("members = %+v, want 3", members)
 	}
 	for _, m := range members {
-		if m.IsLearner || len(m.ClientURLs) == 0 {
-			t.Errorf("member %+v, want a voter with client URLs", m)
+		if m.IsLearner || len(m.ClientURLs) == 0 || len(m.PeerURLs) == 0 {
+			t.Errorf("member %+v, want a voter with client and peer URLs", m)
 		}
 		remote, err := c.Status(ctx, m.ClientURLs[0])
 		if err != nil {
@@ -103,39 +104,6 @@ func TestMembersIncludeLearners(t *testing.T) {
 	}
 }
 
-func TestMetrics(t *testing.T) {
-	cl := etcdtest.Start(t, 3)
-	ctx := timeout(t)
-	c := newClient(t, cl.Members[0])
-	members, err := c.Members(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Streams come up shortly after the leader is elected.
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		allActive := true
-		for _, m := range members {
-			peers, err := c.Metrics(ctx, m.ClientURLs[0], m.ID)
-			if err != nil {
-				t.Fatalf("Metrics(%s) error = %v", m.ClientURLs[0], err)
-			}
-			for _, other := range members {
-				if other.ID != m.ID && !peers.Active[other.ID] {
-					allActive = false
-				}
-			}
-		}
-		if allActive {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("not every member reports every peer as active")
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
 func TestMoveLeader(t *testing.T) {
 	cl := etcdtest.Start(t, 3)
 	ctx := timeout(t)
@@ -159,55 +127,77 @@ func TestMoveLeader(t *testing.T) {
 	}
 }
 
-func TestRecords(t *testing.T) {
-	cl := etcdtest.Start(t, 3)
+// eventuallyRecord waits until reader's view of member id's record satisfies
+// want. Serializable reads on a member other than the writer may lag.
+func eventuallyRecord(t *testing.T, reader *Client, id uint64, want func(Record, bool) bool) {
+	t.Helper()
 	ctx := timeout(t)
-	c := newClient(t, cl.Members[0])
-	id := cl.ID(t, cl.Members[0])
-
-	keepCtx, stop := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	want := Record{SchemaVersion: RecordSchemaVersion, Identity: "zone-a", AgentVersion: "test"}
-	go func() { done <- c.KeepRecord(keepCtx, id, want, 5*time.Second) }()
-
-	reader := newClient(t, cl.Members[1])
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		records, err := reader.Records(ctx)
 		if err != nil {
 			t.Fatalf("Records() error = %v", err)
 		}
-		if got, ok := records[id]; ok {
-			if got != want {
-				t.Errorf("record = %+v, want %+v", got, want)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("record did not appear")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	stop()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Errorf("KeepRecord() error = %v, want context.Canceled", err)
-	}
-	// Serializable reads on another member may briefly lag behind the revoke.
-	deadline = time.Now().Add(10 * time.Second)
-	for {
-		records, err := reader.Records(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := records[id]; !ok {
+		r, ok := records[id]
+		if want(r, ok) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("record is still present after KeepRecord returned")
+			t.Fatalf("record of %x = %+v (present: %v), not as expected", id, r, ok)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func TestRecordLifecycle(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	c := newClient(t, cl.Members[0])
+	reader := newClient(t, cl.Members[1])
+	id := cl.ID(t, cl.Members[0])
+
+	lease, err := c.GrantLease(ctx, 5*time.Second)
+	if err != nil {
+		t.Fatalf("GrantLease() error = %v", err)
+	}
+	first := Record{SchemaVersion: RecordSchemaVersion, Identity: "zone-a", AgentVersion: "test", Sees: map[string]bool{"b": true, "c": true}}
+	if err := c.PutRecord(ctx, id, first, lease); err != nil {
+		t.Fatalf("PutRecord() error = %v", err)
+	}
+	eventuallyRecord(t, reader, id, func(r Record, ok bool) bool { return ok && reflect.DeepEqual(r, first) })
+
+	second := first
+	second.Sees = map[string]bool{"b": false, "c": true}
+	if err := c.PutRecord(ctx, id, second, lease); err != nil {
+		t.Fatalf("PutRecord() error = %v", err)
+	}
+	eventuallyRecord(t, reader, id, func(r Record, ok bool) bool { return ok && reflect.DeepEqual(r, second) })
+
+	if err := c.RenewLease(ctx, lease); err != nil {
+		t.Fatalf("RenewLease() error = %v", err)
+	}
+	if err := c.RevokeLease(ctx, lease); err != nil {
+		t.Fatalf("RevokeLease() error = %v", err)
+	}
+	eventuallyRecord(t, reader, id, func(_ Record, ok bool) bool { return !ok })
+	if err := c.RenewLease(ctx, lease); !errors.Is(err, ErrLeaseExpired) {
+		t.Errorf("RenewLease() after revoke error = %v, want ErrLeaseExpired", err)
+	}
+}
+
+func TestRecordExpiresWithoutRenewal(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	c := newClient(t, cl.Members[0])
+	id := cl.ID(t, cl.Members[0])
+	lease, err := c.GrantLease(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutRecord(ctx, id, Record{SchemaVersion: RecordSchemaVersion}, lease); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyRecord(t, c, id, func(_ Record, ok bool) bool { return !ok })
 }
 
 func TestRecordsSkipInvalidValues(t *testing.T) {
@@ -228,7 +218,7 @@ func TestRecordsSkipInvalidValues(t *testing.T) {
 		t.Fatalf("Records() error = %v", err)
 	}
 	want := map[uint64]Record{2: {SchemaVersion: 1, Identity: "zone-b"}}
-	if len(records) != 1 || records[2] != want[2] {
+	if !reflect.DeepEqual(records, want) {
 		t.Errorf("records = %+v, want %+v", records, want)
 	}
 }
