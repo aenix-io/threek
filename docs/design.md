@@ -340,7 +340,11 @@ Every pull request runs:
 - **Unit tests** for argument handling: every etcd flag syntax, `ETCD_*` environment, `--config-file`, removal of `--threek-*`.
 - **Supervisor tests**: signal forwarding, exit codes, `exec` for non-server invocations, agent crash isolation (etcd must survive).
 - **Integration tests** against real etcd processes with mTLS: the etcd client calls, the probes and the return to the preferred leader with three agents.
-- **End-to-end tests**: three members of the threek image in containers, run as Talos runs etcd, with links broken by `iptables` drop rules. They assert that the leader moves after a partial partition and that clients of the cut-off member can write again, that nothing moves on a site failure or in `dry-run`, and that the image exits like upstream etcd on stop.
+- **End-to-end tests**: three members of the threek image in containers, run as Talos runs etcd, with links broken by `iptables` drop rules. They assert that:
+  - the leader moves after a partial partition, the leader's agent counts the transfer, and clients of the cut-off member can write again;
+  - the leader settles on the preferred member, leaves it when the preferred member is the one cut off, and returns after the partition heals;
+  - nothing moves on a site failure, on a partition between followers, on a link that flaps for shorter than `--threek-down-after` probes, or in `dry-run`;
+  - the image exits like upstream etcd on stop.
 
 Integration and end-to-end tests run against every supported etcd minor version.
 
