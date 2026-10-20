@@ -54,6 +54,7 @@ Expected reaction time with the defaults is about 25 seconds from the link failu
 ## Requirements and limitations
 
 - Exactly three voting members. Learners are ignored.
+- The client port (2379) must be reachable between members, not only the peer port (2380): the leader reads the other members' metrics through it.
 - Client certificate authentication (mTLS) is supported and expected.
   etcd authentication (`etcdctl auth enable`, `spec.auth` in etcd-operator) is not supported: `MoveLeader` requires the root role.
 - Client and peer TLS as configured by Talos or etcd-operator: the agent reuses etcd's own certificates.

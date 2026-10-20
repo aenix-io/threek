@@ -140,6 +140,13 @@ Link state uses hysteresis on top of etcd's own 5 s timeout:
 
 Because every row is fetched by the leader's own agent at a locally known moment, view freshness never compares clocks of different machines.
 
+Followers' agents only read their own member; reading the other members is the leader's job.
+
+The member cut off from the leader never has to report anything.
+The leader learns that it cannot reach that member from its own row, and learns that the candidate reaches everyone from the candidate's row.
+A member that reaches everyone reaches the leader too, so the candidate's row is always readable when a transfer is needed.
+The only exception is a network that passes peer traffic (port 2380) but blocks client traffic (port 2379) between members: the candidate's row is then unknown and threek does nothing.
+
 ## Member records
 
 For the preferred leader feature the leader must know the identity of every member.
@@ -345,7 +352,7 @@ With a preferred leader configured, threek does not return the leader to a membe
 
 ### etcd versions
 
-The connectivity signal relies on `etcd_network_active_peers` and `etcd_network_disconnected_peers_total`, verified against etcd v3.6.
+The connectivity signal relies on `etcd_network_active_peers` and `etcd_network_disconnected_peers_total`, verified against the source of etcd v3.6 and v3.7.
 Every other supported version must pass the end-to-end suite.
 
 ## Rejected alternatives
