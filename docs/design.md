@@ -1,6 +1,6 @@
 # threek design
 
-Status: draft. The supervisor and the decision engine are implemented; the agent's etcd I/O is not.
+Status: draft. The supervisor, the decision engine and the agent are implemented. The container image, end-to-end partition tests and the agent's metrics endpoint are not.
 
 ## Problem
 
@@ -170,11 +170,11 @@ It returns either "no action" or "transfer to member X, reason R".
 
 ### Priorities
 
-1. **Partial partition.** The leader has a link to some member that has been down for at least `--threek-move-after` (counted from the moment the link was declared down), and the third member has every link up, both in its own row and in the leader's. Transfer to that member, even if it is not the preferred leader.
+1. **Partial partition.** The leader has a link to some member that has been down for at least `--threek-move-after` (counted from the moment the link was declared down), and the third member is healthy and has every link up, both in its own row and in the leader's. Transfer to that member, even if it is not the preferred leader.
 2. **Preferred leader.** Every link has been up for at least `--threek-prefer-after`, the local member is not the preferred one, exactly one voting member carries the preferred identity, and that member is healthy. Transfer to the preferred member.
 3. Otherwise, do nothing.
 
-"Healthy" for the preferred member means its `Status` call answers within the poll timeout and its applied index is not lagging behind.
+A transfer target, under either rule, must be healthy: its `Status` call answers within the poll timeout, it reports no alarms, and its applied index is at most 1000 entries behind the leader's.
 A member busy with defragmentation blocks its backend, fails this check and is not chosen as a target.
 
 If several members share the preferred identity, the agent logs a warning and ignores the preference.
@@ -184,6 +184,8 @@ If several members share the preferred identity, the agent logs a warning and ig
 An agent may not transfer leadership away until `--threek-move-cooldown` has passed since its member became the leader.
 Leadership acquisition is observed locally (through `Status`), so the limit holds across leader changes, and no shared state is needed.
 The trade-off: a partition that starts shortly after any leadership change, including a manual or operator-initiated one, is handled only after the cooldown expires.
+
+Every transfer attempt pauses writes until it completes or times out, so a failed attempt is retried only after `--threek-move-cooldown`.
 
 Without a preferred leader the leader stays wherever it moved after the partition heals.
 

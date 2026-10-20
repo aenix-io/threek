@@ -2,7 +2,7 @@
 
 A drop-in etcd supervisor that keeps the Raft leader on a member every other member can reach.
 
-> **Status:** early development, not usable yet. The supervisor and the decision engine are implemented; the agent does not talk to etcd yet. See [docs/design.md](docs/design.md).
+> **Status:** early development, not released yet. The supervisor, the decision engine and the agent are implemented; there is no container image yet. See [docs/design.md](docs/design.md).
 
 ## The problem
 
@@ -99,7 +99,7 @@ With `--threek-mode=off` the image behaves exactly like upstream etcd, so rollin
 ## Development
 
 ```bash
-make test   # unit and integration tests
+make test   # unit and integration tests; set TEST_ETCD_BINARY to an etcd binary to run the tests against real clusters
 make lint   # golangci-lint
 make build  # bin/threek
 ```
