@@ -97,6 +97,22 @@ The supervisor removes `--threek-*` flags and `THREEK_*` variables before starti
 
 With `--threek-mode=off` the image behaves exactly like upstream etcd, so rolling back is a flag change.
 
+## Releases
+
+Every release publishes one image per supported etcd version, for `linux/amd64` and `linux/arm64`:
+
+```text
+ghcr.io/aenix-io/threek:<threek version>-etcd<etcd version>
+```
+
+Tags are never moved. Images carry provenance and an SBOM, and are signed with cosign keyless signing:
+
+```bash
+cosign verify ghcr.io/aenix-io/threek:<threek version>-etcd<etcd version> \
+  --certificate-identity-regexp '^https://github.com/aenix-io/threek/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Development
 
 ```bash
