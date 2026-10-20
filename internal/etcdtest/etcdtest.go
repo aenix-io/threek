@@ -61,7 +61,7 @@ func Start(t *testing.T, n int) *Cluster {
 	t.Helper()
 	binary := Binary(t)
 	dir := t.TempDir()
-	ca := newCA(t, dir)
+	ca := NewCA(t, dir)
 
 	cl := &Cluster{}
 	var initial []string
@@ -71,13 +71,16 @@ func Start(t *testing.T, n int) *Cluster {
 			ClientURL: "https://" + freeAddr(t),
 			PeerURL:   "https://" + freeAddr(t),
 		}
-		cert, key := ca.issue(t, dir, m.Name)
+		cert, key := ca.Issue(t, dir, m.Name)
 		m.Settings = etcdconf.Settings{
 			CertFile:            cert,
 			KeyFile:             key,
-			TrustedCAFile:       ca.certFile,
+			TrustedCAFile:       ca.CertFile,
 			ListenClientURLs:    []string{m.ClientURL},
 			AdvertiseClientURLs: []string{m.ClientURL},
+			PeerCertFile:        cert,
+			PeerKeyFile:         key,
+			PeerTrustedCAFile:   ca.CertFile,
 		}
 		cl.Members = append(cl.Members, m)
 		initial = append(initial, m.Name+"="+m.PeerURL)
@@ -99,11 +102,11 @@ func Start(t *testing.T, n int) *Cluster {
 			"--initial-cluster-token=etcdtest",
 			"--cert-file="+m.Settings.CertFile,
 			"--key-file="+m.Settings.KeyFile,
-			"--trusted-ca-file="+ca.certFile,
+			"--trusted-ca-file="+ca.CertFile,
 			"--client-cert-auth",
 			"--peer-cert-file="+m.Settings.CertFile,
 			"--peer-key-file="+m.Settings.KeyFile,
-			"--peer-trusted-ca-file="+ca.certFile,
+			"--peer-trusted-ca-file="+ca.CertFile,
 			"--peer-client-cert-auth",
 		)
 		m.cmd.Stdout, m.cmd.Stderr = logFile, logFile
@@ -249,13 +252,14 @@ func tail(s string, lines int) string {
 	return strings.Join(all, "\n")
 }
 
-type ca struct {
+// CA issues certificates for test clusters.
+type CA struct {
 	cert     *x509.Certificate
 	key      *ecdsa.PrivateKey
-	certFile string
+	CertFile string
 }
 
-func newCA(t *testing.T, dir string) *ca {
+func NewCA(t *testing.T, dir string) *CA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -278,14 +282,15 @@ func newCA(t *testing.T, dir string) *ca {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &ca{cert: cert, key: key, certFile: filepath.Join(dir, "ca.crt")}
-	writePEM(t, c.certFile, "CERTIFICATE", der)
+	c := &CA{cert: cert, key: key, CertFile: filepath.Join(dir, "ca.crt")}
+	writePEM(t, c.CertFile, "CERTIFICATE", der)
 	return c
 }
 
-// issue creates a certificate usable as etcd server, peer and client
-// certificate, like the ones Talos issues.
-func (c *ca) issue(t *testing.T, dir, name string) (certFile, keyFile string) {
+// Issue creates a certificate usable as etcd server, peer and client
+// certificate, like the ones Talos issues. It covers the loopback addresses,
+// localhost and ips.
+func (c *CA) Issue(t *testing.T, dir, name string, ips ...net.IP) (certFile, keyFile string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -303,7 +308,7 @@ func (c *ca) issue(t *testing.T, dir, name string) (certFile, keyFile string) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		IPAddresses:  append([]net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}, ips...),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
 	if err != nil {
@@ -320,9 +325,10 @@ func (c *ca) issue(t *testing.T, dir, name string) (certFile, keyFile string) {
 	return certFile, keyFile
 }
 
+// writePEM makes files world-readable: containers read them as another user.
 func writePEM(t *testing.T, path, typ string, der []byte) {
 	t.Helper()
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o600); err != nil {
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
