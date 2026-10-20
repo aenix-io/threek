@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	build := exec.Command("docker", "build", "--quiet", "--tag", nettools, "-")
-	build.Stdin = strings.NewReader("FROM " + nettoolsBase + "\nRUN apk add --no-cache iptables\n")
+	build.Stdin = strings.NewReader("FROM " + nettoolsBase + "\nRUN apk add --no-cache curl iptables\n")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Println("build network tools image:", err)
@@ -242,6 +242,13 @@ func (c *cluster) moveLeaderTo(m *member) {
 	})
 }
 
+// metrics returns the agent metrics of member m.
+func (c *cluster) metrics(m *member) string {
+	c.t.Helper()
+	return mustDocker(c.t, "run", "--rm", "--network", "container:"+m.container, nettools,
+		"curl", "--silent", "--fail", "http://127.0.0.1:2390/metrics")
+}
+
 // partition drops all traffic between x and y in both directions, without
 // resets, like a broken WAN link.
 func (c *cluster) partition(x, y *member) {
@@ -279,7 +286,7 @@ func always(t *testing.T, period time.Duration, what string, cond func() (bool, 
 }
 
 func TestPartialPartitionMovesLeaderToMemberThatSeesEveryone(t *testing.T) {
-	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s")
+	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s", "--threek-metrics-listen=127.0.0.1:2390")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 	c.moveLeaderTo(a)
 
@@ -293,6 +300,9 @@ func TestPartialPartitionMovesLeaderToMemberThatSeesEveryone(t *testing.T) {
 
 	if _, err := c.etcdctl(b, "put", "e2e", "written-through-b"); err != nil {
 		t.Errorf("write through b after the transfer: %v", err)
+	}
+	if m := c.metrics(a); !strings.Contains(m, `threek_transfers_total{reason="partition",result="success"} 1`) {
+		t.Errorf("metrics of a do not count the transfer:\n%s", m)
 	}
 }
 
