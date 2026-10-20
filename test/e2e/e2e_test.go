@@ -259,6 +259,40 @@ func (c *cluster) partition(x, y *member) {
 	}
 }
 
+// heal removes the rules partition added between x and y.
+func (c *cluster) heal(x, y *member) {
+	c.t.Helper()
+	for _, pair := range [][2]*member{{x, y}, {y, x}} {
+		mustDocker(c.t, "run", "--rm", "--network", "container:"+pair[0].container, "--cap-add", "NET_ADMIN", nettools,
+			"sh", "-c", fmt.Sprintf("iptables -D INPUT -s %[1]s -j DROP && iptables -D OUTPUT -d %[1]s -j DROP", pair[1].ip))
+	}
+}
+
+// flap breaks the link between x and y for down every period, until the test
+// ends. Rules in x's network namespace alone cut the link both ways.
+func (c *cluster) flap(x, y *member, down, period time.Duration) {
+	c.t.Helper()
+	name := x.container + "-flap"
+	script := fmt.Sprintf("while true; do "+
+		"iptables -I INPUT -s %[1]s -j DROP; iptables -I OUTPUT -d %[1]s -j DROP; sleep %[2]g; "+
+		"iptables -D INPUT -s %[1]s -j DROP; iptables -D OUTPUT -d %[1]s -j DROP; sleep %[3]g; done",
+		y.ip, down.Seconds(), (period - down).Seconds())
+	mustDocker(c.t, "run", "--detach", "--name", name, "--network", "container:"+x.container, "--cap-add", "NET_ADMIN", nettools, "sh", "-c", script)
+	c.t.Cleanup(func() { _, _ = docker("rm", "--force", name) })
+}
+
+// leaderIs reports whether every member in members sees m as the leader.
+func (c *cluster) leaderIs(m *member, members ...*member) (bool, string) {
+	var seen []string
+	ok := true
+	for _, x := range members {
+		l := c.leaderSeenBy(x)
+		seen = append(seen, fmt.Sprintf("%s sees %x", x.name, l))
+		ok = ok && l == m.id
+	}
+	return ok, "(" + strings.Join(seen, ", ") + ")"
+}
+
 func eventually(t *testing.T, timeout time.Duration, what string, cond func() (bool, string)) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -347,4 +381,57 @@ func TestStopEndsLikeUpstreamEtcd(t *testing.T) {
 	if code := mustDocker(t, "inspect", "--format", "{{.State.ExitCode}}", a.container); code != "0" {
 		t.Errorf("exit code = %s, want 0 as upstream etcd exits as PID 1", code)
 	}
+}
+
+func TestPreferredLeaderYieldsToPartitionAndReturns(t *testing.T) {
+	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s",
+		"--threek-preferred-leader=zone-c", "--threek-prefer-after=10s")
+	a, b, w := c.member("a"), c.member("b"), c.member("c")
+
+	eventually(t, 90*time.Second, "leader settles on the preferred member c", func() (bool, string) {
+		return c.leaderIs(w, a, b, w)
+	})
+
+	c.partition(a, w)
+	eventually(t, 90*time.Second, "leader leaves c for b, which reaches everyone", func() (bool, string) {
+		return c.leaderIs(b, a, b, w)
+	})
+
+	c.heal(a, w)
+	healed := time.Now()
+	eventually(t, 90*time.Second, "leader returns to c after the partition heals", func() (bool, string) {
+		return c.leaderIs(w, a, b, w)
+	})
+	t.Logf("leader returned to c %s after the partition healed", time.Since(healed).Round(time.Second))
+}
+
+func TestFlappingLinkKeepsLeader(t *testing.T) {
+	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s")
+	a, b, w := c.member("a"), c.member("b"), c.member("c")
+	c.moveLeaderTo(a)
+
+	c.flap(a, b, 1500*time.Millisecond, 5*time.Second)
+	always(t, 60*time.Second, "leader stays on a", func() (bool, string) {
+		return c.leaderIs(a, a, w)
+	})
+
+	// The flaps must have been seen, or the test proves nothing.
+	logs, err := exec.Command("docker", "logs", a.container).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(logs, fmt.Appendf(nil, `"%x":false`, b.id)) {
+		t.Error("the agent on a never saw b unreachable")
+	}
+}
+
+func TestFollowerPartitionKeepsLeader(t *testing.T) {
+	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s")
+	a, b, w := c.member("a"), c.member("b"), c.member("c")
+	c.moveLeaderTo(a)
+
+	c.partition(b, w)
+	always(t, 45*time.Second, "leader stays on a and both followers follow it", func() (bool, string) {
+		return c.leaderIs(a, a, b, w)
+	})
 }
