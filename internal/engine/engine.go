@@ -71,18 +71,36 @@ func waiting(wait time.Duration, format string, args ...any) Decision {
 	return Decision{Note: fmt.Sprintf(format, args...), Wait: wait}
 }
 
-type linkState int
+type LinkState int
 
 const (
-	linkUnknown linkState = iota
-	linkUp
-	linkDown
+	LinkUnknown LinkState = iota
+	LinkUp
+	LinkDown
 )
+
+func (s LinkState) String() string {
+	switch s {
+	case LinkUp:
+		return "up"
+	case LinkDown:
+		return "down"
+	default:
+		return "unknown"
+	}
+}
+
+// Link is the state of the link from one member to another, as the engine
+// tracks it.
+type Link struct {
+	From, To MemberID
+	State    LinkState
+}
 
 type link struct{ from, to MemberID }
 
 type tracker struct {
-	state      linkState
+	state      LinkState
 	since      time.Time
 	lastActive bool
 	streak     int
@@ -95,10 +113,10 @@ func (t *tracker) sample(active bool, now time.Time, p Params) {
 		t.lastActive, t.streak = active, 1
 	}
 	switch {
-	case active && t.state != linkUp && t.streak >= p.UpAfter:
-		t.state, t.since = linkUp, now
-	case !active && t.state != linkDown && t.streak >= p.DownAfter:
-		t.state, t.since = linkDown, now
+	case active && t.state != LinkUp && t.streak >= p.UpAfter:
+		t.state, t.since = LinkUp, now
+	case !active && t.state != LinkDown && t.streak >= p.DownAfter:
+		t.state, t.since = LinkDown, now
 	}
 }
 
@@ -166,7 +184,7 @@ func (e *Engine) trackLinks(o Observation) {
 			if known {
 				t.sample(row[to.ID], o.Now, e.p)
 			}
-			full = full && known && t.state == linkUp
+			full = full && known && t.state == LinkUp
 		}
 	}
 	switch {
@@ -188,7 +206,7 @@ func (e *Engine) tracker(from, to MemberID) *tracker {
 }
 
 func (e *Engine) up(from, to MemberID) bool {
-	return e.tracker(from, to).state == linkUp
+	return e.tracker(from, to).state == LinkUp
 }
 
 // partition applies the partial partition rule. decided is false when the
@@ -196,7 +214,7 @@ func (e *Engine) up(from, to MemberID) bool {
 func (e *Engine) partition(o Observation) (d Decision, decided bool) {
 	var lost MemberID
 	for _, m := range o.Members {
-		if m.ID != o.Self && e.tracker(o.Self, m.ID).state == linkDown {
+		if m.ID != o.Self && e.tracker(o.Self, m.ID).state == LinkDown {
 			lost = m.ID
 			break
 		}
@@ -272,13 +290,21 @@ func (e *Engine) TransferFailed(now time.Time) {
 	e.retryAfter = now.Add(e.p.MoveCooldown)
 }
 
+// Links returns the state of every tracked link.
+func (e *Engine) Links() []Link {
+	links := make([]Link, 0, len(e.links))
+	for l, t := range e.links {
+		links = append(links, Link{From: l.from, To: l.to, State: t.state})
+	}
+	return links
+}
+
 // View returns the state of every tracked link, keyed "from->to" with
 // member IDs in hex.
 func (e *Engine) View() map[string]string {
-	names := map[linkState]string{linkUnknown: "unknown", linkUp: "up", linkDown: "down"}
 	view := make(map[string]string, len(e.links))
-	for l, t := range e.links {
-		view[fmt.Sprintf("%x->%x", l.from, l.to)] = names[t.state]
+	for _, l := range e.Links() {
+		view[fmt.Sprintf("%x->%x", l.From, l.To)] = l.State.String()
 	}
 	return view
 }

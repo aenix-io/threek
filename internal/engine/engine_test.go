@@ -419,3 +419,27 @@ func TestView(t *testing.T) {
 		}
 	}
 }
+
+func TestLinks(t *testing.T) {
+	cl := newCluster(t, params())
+	cl.warmUp()
+	cl.setCut(a, b, true)
+	cl.expectNoTransfer(params().DownAfter)
+	got := map[[2]MemberID]LinkState{}
+	for _, l := range cl.e.Links() {
+		got[[2]MemberID{l.From, l.To}] = l.State
+	}
+	want := map[[2]MemberID]LinkState{
+		{a, b}: LinkDown, {a, c}: LinkUp,
+		{b, a}: LinkUp, {b, c}: LinkUp,
+		{c, a}: LinkUp, {c, b}: LinkUp,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Links() = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("link %v = %v, want %v", k, got[k], v)
+		}
+	}
+}
