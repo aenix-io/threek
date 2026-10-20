@@ -1,0 +1,179 @@
+// Package config reads threek settings from etcd's command line and environment.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/aenix-io/threek/internal/flagscan"
+)
+
+const (
+	flagPrefix = "threek-"
+	envPrefix  = "THREEK_"
+)
+
+type Mode string
+
+const (
+	ModeOff     Mode = "off"
+	ModeDryRun  Mode = "dry-run"
+	ModeEnforce Mode = "enforce"
+)
+
+type Config struct {
+	Mode            Mode
+	PollInterval    time.Duration
+	DownAfter       int
+	UpAfter         int
+	MoveAfter       time.Duration
+	MoveCooldown    time.Duration
+	Identity        string
+	PreferredLeader string
+	PreferAfter     time.Duration
+	MetricsListen   string
+}
+
+func Default() Config {
+	return Config{
+		Mode:         ModeOff,
+		PollInterval: time.Second,
+		DownAfter:    3,
+		UpAfter:      10,
+		MoveAfter:    15 * time.Second,
+		MoveCooldown: 2 * time.Minute,
+		PreferAfter:  5 * time.Minute,
+	}
+}
+
+type setting struct {
+	name string
+	set  func(c *Config, value string) error
+}
+
+var settings = []setting{
+	{"mode", func(c *Config, v string) error {
+		switch m := Mode(v); m {
+		case ModeOff, ModeDryRun, ModeEnforce:
+			c.Mode = m
+			return nil
+		}
+		return errors.New("must be one of off, dry-run, enforce")
+	}},
+	{"poll-interval", duration(func(c *Config) *time.Duration { return &c.PollInterval }, false)},
+	{"down-after", count(func(c *Config) *int { return &c.DownAfter })},
+	{"up-after", count(func(c *Config) *int { return &c.UpAfter })},
+	{"move-after", duration(func(c *Config) *time.Duration { return &c.MoveAfter }, false)},
+	{"move-cooldown", duration(func(c *Config) *time.Duration { return &c.MoveCooldown }, true)},
+	{"identity", text(func(c *Config) *string { return &c.Identity })},
+	{"preferred-leader", text(func(c *Config) *string { return &c.PreferredLeader })},
+	{"prefer-after", duration(func(c *Config) *time.Duration { return &c.PreferAfter }, false)},
+	{"metrics-listen", text(func(c *Config) *string { return &c.MetricsListen })},
+}
+
+func duration(field func(*Config) *time.Duration, zeroAllowed bool) func(*Config, string) error {
+	return func(c *Config, v string) error {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			return err
+		case d < 0:
+			return errors.New("must not be negative")
+		case d == 0 && !zeroAllowed:
+			return errors.New("must be positive")
+		}
+		*field(c) = d
+		return nil
+	}
+}
+
+func count(field func(*Config) *int) func(*Config, string) error {
+	return func(c *Config, v string) error {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return errors.New("must be an integer")
+		}
+		if n < 1 {
+			return errors.New("must be at least 1")
+		}
+		*field(c) = n
+		return nil
+	}
+}
+
+func text(field func(*Config) *string) func(*Config, string) error {
+	return func(c *Config, v string) error {
+		*field(c) = v
+		return nil
+	}
+}
+
+func lookup(name string) (setting, bool) {
+	for _, s := range settings {
+		if s.name == name {
+			return s, true
+		}
+	}
+	return setting{}, false
+}
+
+func envName(name string) string {
+	return envPrefix + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+}
+
+// Parse reads threek settings from etcd's command line and environment.
+// Flags win over environment variables. It returns the command line and
+// environment to start etcd with: etcd rejects unknown flags, so every
+// --threek-* flag and THREEK_* variable is removed.
+func Parse(args, environ []string) (cfg Config, etcdArgs, etcdEnv []string, err error) {
+	cfg = Default()
+
+	byEnv := make(map[string]setting, len(settings))
+	for _, s := range settings {
+		byEnv[envName(s.name)] = s
+	}
+	for _, kv := range environ {
+		key, value, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(key, envPrefix) {
+			etcdEnv = append(etcdEnv, kv)
+			continue
+		}
+		s, ok := byEnv[key]
+		if !ok {
+			return Config{}, nil, nil, fmt.Errorf("unknown environment variable %q", key)
+		}
+		if err := s.set(&cfg, value); err != nil {
+			return Config{}, nil, nil, fmt.Errorf("%s: %w", key, err)
+		}
+	}
+
+	ours := func(name string) bool { return strings.HasPrefix(name, flagPrefix) }
+	next := 0
+	for _, f := range flagscan.Scan(args, ours) {
+		if !ours(f.Name) {
+			continue
+		}
+		flag := "--" + f.Name
+		s, ok := lookup(strings.TrimPrefix(f.Name, flagPrefix))
+		if !ok {
+			return Config{}, nil, nil, fmt.Errorf("unknown flag %q", flag)
+		}
+		if !f.HasValue {
+			return Config{}, nil, nil, fmt.Errorf("flag %q needs a value", flag)
+		}
+		if err := s.set(&cfg, f.Value); err != nil {
+			return Config{}, nil, nil, fmt.Errorf("%s: %w", flag, err)
+		}
+		etcdArgs = append(etcdArgs, args[next:f.Start]...)
+		next = f.End
+	}
+	etcdArgs = append(etcdArgs, args[next:]...)
+
+	if cfg.PreferredLeader != "" && cfg.Identity == "" {
+		return Config{}, nil, nil, errors.New("--threek-preferred-leader requires --threek-identity")
+	}
+	return cfg, etcdArgs, etcdEnv, nil
+}
