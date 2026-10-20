@@ -1,6 +1,6 @@
 # threek design
 
-Status: draft. Everything below is implemented except the agent's metrics endpoint. Nothing is released yet.
+Status: draft. Everything below is implemented. Nothing is released yet.
 
 ## Problem
 
@@ -299,12 +299,15 @@ Metrics, when `--threek-metrics-listen` is set:
 
 | Metric | Meaning |
 | --- | --- |
-| `threek_link_up{from,to}` | link state after hysteresis, as seen by this agent |
+| `threek_link_up{from,to}` | link state after hysteresis, as seen by this agent: 1 up, 0 down or unknown |
 | `threek_is_leader` | whether the local member is the leader |
 | `threek_transfers_total{reason,result}` | transfers attempted, by reason and result |
 | `threek_dry_run_transfers_total{reason}` | transfers that would have happened in `dry-run` |
 | `threek_member_records` | member records visible to this agent |
+| `threek_poll_failures_total` | polls that could not read the local member |
 
+The endpoint also serves the Go runtime and process metrics of the agent.
+The agent serves it, not the supervisor, so it is unavailable while the agent restarts.
 The supervisor logs every agent restart.
 
 ## Versioning and upgrades

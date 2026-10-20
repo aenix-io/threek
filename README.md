@@ -89,6 +89,7 @@ Extra arguments apply only to new members, so changing the mode means rolling th
 | `--threek-mode` | `off` | `off`: plain etcd. `dry-run`: decide and log only. `enforce`: transfer leadership. |
 | `--threek-identity` | empty | label of this member, such as a zone or a node name |
 | `--threek-preferred-leader` | empty | identity that should hold the leader in normal operation |
+| `--threek-metrics-listen` | empty | address for the agent's Prometheus metrics, such as `127.0.0.1:2390` |
 
 Timing flags and the full reference are in [docs/design.md](docs/design.md#configuration).
 Every flag can also be set through an environment variable (`--threek-mode` ↔ `THREEK_MODE`). The flag wins.
