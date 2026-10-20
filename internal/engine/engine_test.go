@@ -372,3 +372,50 @@ func TestRemovedMemberLinksAreForgotten(t *testing.T) {
 		t.Errorf("tracked links = %d, want 2", got)
 	}
 }
+
+func TestNotesAreStableWhileWaiting(t *testing.T) {
+	cl := newCluster(t, params())
+	cl.warmUp()
+	cl.setCut(a, b, true)
+	cl.expectNoTransfer(params().DownAfter)
+	first := cl.poll()
+	second := cl.poll()
+	if first.Note != second.Note {
+		t.Errorf("notes differ while waiting: %q, %q", first.Note, second.Note)
+	}
+	if first.Wait != second.Wait+time.Second {
+		t.Errorf("wait = %s then %s, want it to count down by the poll interval", first.Wait, second.Wait)
+	}
+}
+
+func TestFailedTransferWaitsForCooldown(t *testing.T) {
+	p := params()
+	p.MoveCooldown = 30 * time.Second
+	cl := newCluster(t, p)
+	cl.expectNoTransfer(40)
+	cl.setCut(a, b, true)
+	cl.expectTransferAt(partitionTransferPoll, c, ReasonPartition)
+	cl.e.TransferFailed(cl.now.Add(-time.Second))
+	cl.expectTransferAt(30, c, ReasonPartition)
+}
+
+func TestView(t *testing.T) {
+	cl := newCluster(t, params())
+	cl.warmUp()
+	cl.setCut(a, b, true)
+	cl.expectNoTransfer(params().DownAfter)
+	view := cl.e.View()
+	want := map[string]string{
+		"1->2": "down", "1->3": "up",
+		"2->1": "up", "2->3": "up",
+		"3->1": "up", "3->2": "up",
+	}
+	if len(view) != len(want) {
+		t.Fatalf("View() = %v, want %v", view, want)
+	}
+	for k, v := range want {
+		if view[k] != v {
+			t.Errorf("View()[%s] = %q, want %q", k, view[k], v)
+		}
+	}
+}

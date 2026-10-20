@@ -53,16 +53,22 @@ const (
 )
 
 // Decision is either a leadership transfer or no action, with a note
-// explaining the outcome for logs.
+// explaining the outcome for logs. The note stays the same while the
+// situation does; Wait counts down to a pending transfer.
 type Decision struct {
 	Transfer bool
 	Target   MemberID
 	Reason   Reason
 	Note     string
+	Wait     time.Duration
 }
 
 func none(format string, args ...any) Decision {
 	return Decision{Note: fmt.Sprintf(format, args...)}
+}
+
+func waiting(wait time.Duration, format string, args ...any) Decision {
+	return Decision{Note: fmt.Sprintf(format, args...), Wait: wait}
 }
 
 type linkState int
@@ -103,6 +109,7 @@ type Engine struct {
 	leaderTerm  uint64
 	leaderSince time.Time
 	fullSince   time.Time
+	retryAfter  time.Time
 }
 
 func New(p Params) *Engine {
@@ -198,7 +205,7 @@ func (e *Engine) partition(o Observation) (d Decision, decided bool) {
 		return Decision{}, false
 	}
 	if wait := e.p.MoveAfter - o.Now.Sub(e.tracker(o.Self, lost).since); wait > 0 {
-		return none("member %d unreachable, transfer in %s", lost, wait), true
+		return waiting(wait, "member %x unreachable, transfer pending", lost), true
 	}
 
 	var candidate Member
@@ -210,9 +217,9 @@ func (e *Engine) partition(o Observation) (d Decision, decided bool) {
 	_, fresh := o.Active[candidate.ID]
 	switch {
 	case !fresh || !candidate.Healthy:
-		return none("member %d unreachable, member %d is unavailable", lost, candidate.ID), true
+		return none("member %x unreachable, member %x is unavailable", lost, candidate.ID), true
 	case !e.up(o.Self, candidate.ID) || !e.up(candidate.ID, o.Self) || !e.up(candidate.ID, lost):
-		return none("member %d unreachable, no member reaches everyone", lost), true
+		return none("member %x unreachable, no member reaches everyone", lost), true
 	}
 	return e.transfer(o, candidate.ID, ReasonPartition), true
 }
@@ -239,20 +246,39 @@ func (e *Engine) preferred(o Observation) Decision {
 	}
 	target := matches[0]
 	if !target.Healthy {
-		return none("preferred member %d is unhealthy", target.ID)
+		return none("preferred member %x is unhealthy", target.ID)
 	}
 	if e.fullSince.IsZero() {
 		return none("waiting for full connectivity")
 	}
 	if wait := e.p.PreferAfter - o.Now.Sub(e.fullSince); wait > 0 {
-		return none("returning to the preferred member in %s", wait)
+		return waiting(wait, "return to the preferred member pending")
 	}
 	return e.transfer(o, target.ID, ReasonPreferred)
 }
 
 func (e *Engine) transfer(o Observation, target MemberID, reason Reason) Decision {
-	if wait := e.p.MoveCooldown - o.Now.Sub(e.leaderSince); wait > 0 {
-		return none("%s transfer to member %d in %s, after cooldown", reason, target, wait)
+	wait := max(e.p.MoveCooldown-o.Now.Sub(e.leaderSince), e.retryAfter.Sub(o.Now))
+	if wait > 0 {
+		return waiting(wait, "%s: transfer to member %x after cooldown", reason, target)
 	}
-	return Decision{Transfer: true, Target: target, Reason: reason, Note: fmt.Sprintf("%s: transfer to member %d", reason, target)}
+	return Decision{Transfer: true, Target: target, Reason: reason, Note: fmt.Sprintf("%s: transfer to member %x", reason, target)}
+}
+
+// TransferFailed records a failed transfer attempted at now. Every attempt
+// pauses writes until it completes or times out, so the next one waits for
+// the cooldown.
+func (e *Engine) TransferFailed(now time.Time) {
+	e.retryAfter = now.Add(e.p.MoveCooldown)
+}
+
+// View returns the state of every tracked link, keyed "from->to" with
+// member IDs in hex.
+func (e *Engine) View() map[string]string {
+	names := map[linkState]string{linkUnknown: "unknown", linkUp: "up", linkDown: "down"}
+	view := make(map[string]string, len(e.links))
+	for l, t := range e.links {
+		view[fmt.Sprintf("%x->%x", l.from, l.to)] = names[t.state]
+	}
+	return view
 }
