@@ -94,7 +94,7 @@ Supervisor behavior:
 
 ### Reading etcd settings
 
-The agent needs a few etcd settings: client TLS files, client URLs and whether client certificate auth is on.
+The agent needs a few etcd settings: client TLS files and client URLs.
 etcd accepts settings from flags (`-flag`, `--flag`, `--flag=value`, `--flag value`), from `ETCD_*` environment variables and from `--config-file`.
 The agent resolves its subset using etcd's own precedence rules and never rewrites them.
 
