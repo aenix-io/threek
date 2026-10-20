@@ -23,11 +23,31 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - etcd: v3.6.15
+            sha256: b51d86e6bff2168de5ba8cd631c0fe6c785c7a1b32b083079f5677d6b7e2772c
+          - etcd: v3.7.2
+            sha256: 3a3679bc51a4ee9d30bccea1da7cd4fe62c6fc1d2ca1255068d2c53bf3026135
+    name: test (etcd ${{ matrix.etcd }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Install etcd
+        env:
+          ETCD_VERSION: ${{ matrix.etcd }}
+          ETCD_SHA256: ${{ matrix.sha256 }}
+        run: |
+          archive="etcd-${ETCD_VERSION}-linux-amd64.tar.gz"
+          curl --silent --show-error --location --fail --output "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/${archive}"
+          echo "${ETCD_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+          tar --extract --gzip --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
+          echo "TEST_ETCD_BINARY=${RUNNER_TEMP}/etcd-${ETCD_VERSION}-linux-amd64/etcd" >> "${GITHUB_ENV}"
       - run: go test -race ./...
 
   markdown:
