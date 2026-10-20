@@ -95,6 +95,13 @@ Supervisor behavior:
 5. When the agent exits, restart it with exponential backoff. etcd keeps running.
 6. Write nothing to stdout. Supervisor and agent log JSON to stderr with a `"logger":"threek"` field, so they can be told apart from etcd's own log lines.
 
+The agent also exits when its poll loop completes no poll for 30 s, so the supervisor restarts an agent that hangs instead of crashing.
+Every call in a poll has a timeout, so only a bug can trigger this.
+
+The agent has no liveness or readiness probe of its own.
+Kubernetes and Talos probes act on the whole container, so failing one for the agent would restart etcd.
+The container's probes keep checking etcd, which the agent never affects.
+
 ### Reading etcd settings
 
 The agent needs a few etcd settings: client and peer TLS files and client URLs.
@@ -305,6 +312,7 @@ Metrics, when `--threek-metrics-listen` is set:
 | `threek_dry_run_transfers_total{reason}` | transfers that would have happened in `dry-run` |
 | `threek_member_records` | member records visible to this agent |
 | `threek_poll_failures_total` | polls that could not read the local member |
+| `threek_last_poll_timestamp_seconds` | Unix time of the last successful poll, for alerting on an agent that stopped working |
 
 The endpoint also serves the Go runtime and process metrics of the agent.
 The agent serves it, not the supervisor, so it is unavailable while the agent restarts.
