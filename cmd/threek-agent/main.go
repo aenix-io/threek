@@ -83,16 +83,28 @@ func main() {
 	initial := config.Default()
 	initial.Identity = opts.identity
 	initial.MetricsListen = opts.metricsListen
+	keepRunning(ctx, func(ctx context.Context) error {
+		return agent.Run(ctx, initial, opts.load, opts.settings, logger)
+	}, logger, retryDelay)
+}
+
+// keepRunning restarts run until ctx is done. An error that repeats, such as
+// a missing certificate, is logged once.
+func keepRunning(ctx context.Context, run func(context.Context) error, logger *slog.Logger, delay time.Duration) {
+	var last string
 	for {
-		err := agent.Run(ctx, initial, opts.load, opts.settings, logger)
+		err := run(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		logger.Error("agent stopped, restarting", "error", err, "after", retryDelay.String())
+		if err != nil && err.Error() != last {
+			last = err.Error()
+			logger.Error("agent stopped, restarting", "error", err, "after", delay.String())
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(retryDelay):
+		case <-time.After(delay):
 		}
 	}
 }

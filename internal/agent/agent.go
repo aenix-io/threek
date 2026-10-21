@@ -120,6 +120,7 @@ func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func()
 		lastLog:       map[string]string{},
 	}
 	a.setMode()
+	a.metrics.configValid.Set(1)
 	return a
 }
 
@@ -133,6 +134,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		defer stop()
 	}
+	a.reload()
 	a.logger.Info("agent started", "mode", a.cfg.Mode, "version", Version)
 	a.markLoop()
 	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
@@ -184,9 +186,11 @@ func (a *Agent) reload() {
 	}
 	cfg, err := a.load()
 	if err != nil {
+		a.metrics.configValid.Set(0)
 		a.logChange("config", slog.LevelError, "invalid configuration, keeping the previous one", err.Error(), "error", err)
 		return
 	}
+	a.metrics.configValid.Set(1)
 	delete(a.lastLog, "config")
 	if cfg == a.cfg {
 		return

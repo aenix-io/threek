@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aenix-io/threek/internal/config"
 	"github.com/aenix-io/threek/internal/etcdconf"
@@ -108,5 +113,31 @@ func write(t *testing.T, dir, name, value string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestKeepRunningLogsEachErrorOnce(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	errs := []error{errors.New("no CA"), errors.New("no CA"), errors.New("no CA"), errors.New("refused"), nil}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	keepRunning(ctx, func(context.Context) error {
+		err := errs[calls]
+		calls++
+		if calls == len(errs) {
+			cancel()
+		}
+		return err
+	}, logger, time.Millisecond)
+	if calls != len(errs) {
+		t.Fatalf("run called %d times, want %d", calls, len(errs))
+	}
+	if n := strings.Count(logs.String(), "no CA"); n != 1 {
+		t.Errorf("a repeated error logged %d times, want once:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "refused") {
+		t.Errorf("a new error is not logged:\n%s", logs.String())
 	}
 }

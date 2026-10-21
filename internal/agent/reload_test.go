@@ -69,6 +69,33 @@ func TestInvalidConfigurationKeepsThePreviousOne(t *testing.T) {
 	if n := strings.Count(h.logs.String(), "invalid configuration"); n != 1 {
 		t.Errorf("invalid configuration logged %d times, want once:\n%s", n, h.logs)
 	}
+	if got := testutil.ToFloat64(h.agent.metrics.configValid); got != 0 {
+		t.Errorf("threek_config_valid = %v with an invalid configuration, want 0", got)
+	}
+	src.set(fastConfig(config.ModeEnforce), nil)
+	h.ticks(1)
+	if got := testutil.ToFloat64(h.agent.metrics.configValid); got != 1 {
+		t.Errorf("threek_config_valid = %v after a fix, want 1", got)
+	}
+}
+
+func TestStartLogShowsTheLoadedMode(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeOff))
+	watched(h, fastConfig(config.ModeEnforce))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := h.agent.Run(ctx); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for line := range strings.Lines(h.logs.String()) {
+		if strings.Contains(line, `"msg":"agent started"`) {
+			if !strings.Contains(line, `"mode":"enforce"`) {
+				t.Errorf("start log = %s, want the mode from the configuration", line)
+			}
+			return
+		}
+	}
+	t.Errorf("no start log:\n%s", h.logs)
 }
 
 func TestOffWithdrawsTheRecordAndStopsPolling(t *testing.T) {

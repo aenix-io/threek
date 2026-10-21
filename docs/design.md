@@ -357,6 +357,7 @@ Metrics, when `metrics-listen` is set:
 | Metric | Meaning |
 | --- | --- |
 | `threek_mode{mode}` | 1 for the active mode; the metrics below describe only a mode other than `off` |
+| `threek_config_valid` | 0 while the ConfigMap is invalid and the agent keeps the previous settings |
 | `threek_link_up{from,to}` | link state after hysteresis, as seen by this agent: 1 up, 0 down or unknown |
 | `threek_is_leader` | whether the local member is the leader |
 | `threek_transfers_total{reason,result}` | transfers attempted, by reason and result |
