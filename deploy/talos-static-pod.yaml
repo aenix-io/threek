@@ -5,8 +5,7 @@
 #   talosctl --nodes <node> patch machineconfig --patch @talos-static-pod.yaml
 #
 # The agent authenticates with the etcd client certificate Talos issues to
-# kube-apiserver, and picks it up from that Pod's secrets directory. Changing
-# the document restarts the agent only.
+# kube-apiserver. Changing the document restarts the agent only.
 #
 # Talos 1.14 and later. On earlier versions put the Pod under machine.pods.
 apiVersion: v1alpha1
@@ -31,6 +30,35 @@ pod:
       runAsGroup: 65534
       seccompProfile:
         type: RuntimeDefault
+    # Talos writes the certificate files on every boot and does not hold user
+    # static Pods back until then. For a file that does not exist yet, the
+    # runtime creates a directory in its place, which would keep Talos from
+    # writing it and kube-apiserver from starting. This container sees the
+    # whole directory, which also holds the API server's own keys, only to
+    # wait for the files; the agent mounts just the three it needs.
+    initContainers:
+      - name: wait-for-certificates
+        image: ghcr.io/aenix-io/threek-agent:v0.1.0
+        args:
+          - --wait-for=/secrets/etcd-client.crt
+          - --wait-for=/secrets/etcd-client.key
+          - --wait-for=/secrets/etcd-client-ca.crt
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+          - name: kube-apiserver-secrets
+            mountPath: /secrets
+            readOnly: true
     containers:
       - name: threek-agent
         image: ghcr.io/aenix-io/threek-agent:v0.1.0
@@ -61,18 +89,27 @@ pod:
           capabilities:
             drop: ["ALL"]
         volumeMounts:
-          - name: kube-apiserver-secrets
-            mountPath: /etc/threek
+          - name: etcd-client-crt
+            mountPath: /etc/threek/etcd-client.crt
             readOnly: true
-    # The whole directory, not its files: Talos writes the files on every boot,
-    # and a container started before that would get a directory created in
-    # place of a missing file, which then keeps Talos from writing it and
-    # kube-apiserver from starting. A missing directory created that way does
-    # no harm. The directory also holds the API server's own keys; an etcd
-    # client certificate already gives full access to the cluster's data.
+          - name: etcd-client-key
+            mountPath: /etc/threek/etcd-client.key
+            readOnly: true
+          - name: etcd-client-ca
+            mountPath: /etc/threek/etcd-client-ca.crt
+            readOnly: true
     # No hostPath type: kubelet would check it in its own mount namespace,
     # which does not include /system.
     volumes:
       - name: kube-apiserver-secrets
         hostPath:
           path: /system/secrets/kubernetes/kube-apiserver
+      - name: etcd-client-crt
+        hostPath:
+          path: /system/secrets/kubernetes/kube-apiserver/etcd-client.crt
+      - name: etcd-client-key
+        hostPath:
+          path: /system/secrets/kubernetes/kube-apiserver/etcd-client.key
+      - name: etcd-client-ca
+        hostPath:
+          path: /system/secrets/kubernetes/kube-apiserver/etcd-client-ca.crt

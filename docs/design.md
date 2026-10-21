@@ -110,7 +110,7 @@ Talos runs etcd as a system container from its own image, outside Kubernetes, an
 The agent is one more static Pod on every control-plane node, from `deploy/talos-static-pod.yaml`: a `KubeStaticPodConfig` document on Talos 1.14 and later, `machine.pods` before.
 
 - `hostNetwork: true`, the network namespace etcd runs in, so its probes take the same path as etcd's traffic;
-- the etcd client certificate Talos issues to kube-apiserver, `etcd-client.crt`, `etcd-client.key` and `etcd-client-ca.crt`, from the read-only mounted directory `/system/secrets/kubernetes/kube-apiserver/`;
+- the etcd client certificate Talos issues to kube-apiserver: `etcd-client.crt`, `etcd-client.key` and `etcd-client-ca.crt` from `/system/secrets/kubernetes/kube-apiserver/`, mounted file by file;
 - `runAsUser: 65534`, the owner of those files.
 
 Talos starts etcd with `--client-cert-auth` and `--peer-client-cert-auth`, and with one CA file for both `--trusted-ca-file` and `--peer-trusted-ca-file`.
@@ -119,12 +119,14 @@ It is readable by Pods under SELinux in enforcing mode, which the files in `/sys
 
 kubelet runs static Pods without the API server. Changing the document restarts the agent and leaves etcd alone.
 
-The directory is mounted, not its three files. Talos writes the files to tmpfs on every boot and does not hold user static Pods back until then.
+Talos writes these files to tmpfs on every boot and does not hold user static Pods back until then.
 For a file that does not exist yet, containerd creates a directory in its place; Talos could then never write the file, and kube-apiserver would not start on that node.
-A directory created that way does no harm, and the agent retries until the files appear.
-The directory also holds the API server's own keys, such as the service account key.
-The agent can read them, which adds little: its etcd client certificate already gives full access to everything the cluster stores.
-A certificate of its own would avoid that, but Talos cannot issue one: it would have to be signed with the etcd CA outside the cluster, delivered through the machine config, where anyone with the `os:reader` role can read its key, and renewed by hand.
+An init container therefore mounts the directory read-only and waits, with `threek-agent --wait-for`, until the three files exist; the agent's container is created, and its files mounted, only after that.
+
+The directory also holds the API server's own keys: the service account signing key and the key that encrypts Secrets in etcd.
+The agent never sees them. The init container does while it waits, and it runs the same image, so a compromised image could read them in that step.
+Mounting the directory into the agent would avoid the init container, but would hand those keys to the agent for good.
+A certificate of its own would avoid the exposure entirely, but Talos cannot issue one: it would have to be signed with the etcd CA outside the cluster, delivered through the machine config, where anyone with the `os:reader` role can read its key, and renewed by hand.
 
 ### Watchdog
 
