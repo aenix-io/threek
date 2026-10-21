@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/aenix-io/threek/internal/config"
 )
 
@@ -91,6 +93,54 @@ func TestOffWithdrawsTheRecordAndStopsPolling(t *testing.T) {
 	h.ticks(1)
 	if _, ok := h.fake.records[1]; !ok {
 		t.Error("no record published after switching back on")
+	}
+}
+
+// A link seen down before the agent was switched off must not count toward
+// MoveAfter after it is switched back on.
+func TestOffForgetsLinkHistory(t *testing.T) {
+	cfg := fastConfig(config.ModeEnforce)
+	cfg.DownAfter = 3
+	cfg.MoveAfter = 10 * time.Second
+	h := newHarness(cfg)
+	src := watched(h, cfg)
+	h.ticks(2)
+	h.fake.setCut(1, 2)
+	h.ticks(4)
+	if m := h.fake.movesSoFar(); len(m) != 0 {
+		t.Fatalf("moved too early: %v", m)
+	}
+	off := cfg
+	off.Mode = config.ModeOff
+	src.set(off, nil)
+	h.ticks(1)
+	h.now = h.now.Add(time.Hour)
+	src.set(cfg, nil)
+	h.ticks(1)
+	if m := h.fake.movesSoFar(); len(m) != 0 {
+		t.Errorf("moved on the first poll after switching back on, from stale link history: %v", m)
+	}
+}
+
+func TestOffClearsTheView(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeDryRun))
+	src := watched(h, fastConfig(config.ModeDryRun))
+	h.ticks(3)
+	if testutil.CollectAndCount(h.agent.metrics.linkUp) == 0 {
+		t.Fatal("no link metrics while on")
+	}
+	src.set(fastConfig(config.ModeOff), nil)
+	h.ticks(1)
+	if n := testutil.CollectAndCount(h.agent.metrics.linkUp); n != 0 {
+		t.Errorf("%d link metrics left while off", n)
+	}
+	if got := testutil.ToFloat64(h.agent.metrics.records); got != 0 {
+		t.Errorf("member records = %v while off, want 0", got)
+	}
+	for mode, want := range map[string]float64{"off": 1, "dry-run": 0, "enforce": 0} {
+		if got := testutil.ToFloat64(h.agent.metrics.mode.WithLabelValues(mode)); got != want {
+			t.Errorf("threek_mode{mode=%q} = %v, want %v", mode, got, want)
+		}
 	}
 }
 

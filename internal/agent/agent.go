@@ -104,7 +104,7 @@ type Agent struct {
 }
 
 func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func() time.Time) *Agent {
-	return &Agent{
+	a := &Agent{
 		cfg:           cfg,
 		c:             c,
 		prober:        p,
@@ -119,6 +119,8 @@ func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func()
 		started:       time.Now(),
 		lastLog:       map[string]string{},
 	}
+	a.setMode()
+	return a
 }
 
 // Run polls every PollInterval until ctx is done, then withdraws the
@@ -190,8 +192,25 @@ func (a *Agent) reload() {
 		return
 	}
 	a.logger.Info("configuration changed", "mode", cfg.Mode, "preferredLeader", cfg.PreferredLeader)
+	// Link history gathered before the agent was off says nothing about the
+	// links now, so switching on starts over.
+	if (a.cfg.Mode == config.ModeOff) != (cfg.Mode == config.ModeOff) {
+		a.engine = engine.New(engineParams(cfg))
+	} else {
+		a.engine.SetParams(engineParams(cfg))
+	}
 	a.cfg = cfg
-	a.engine.SetParams(engineParams(cfg))
+	a.setMode()
+}
+
+func (a *Agent) setMode() {
+	for _, m := range []config.Mode{config.ModeOff, config.ModeDryRun, config.ModeEnforce} {
+		v := 0.0
+		if m == a.cfg.Mode {
+			v = 1
+		}
+		a.metrics.mode.WithLabelValues(string(m)).Set(v)
+	}
 }
 
 func (a *Agent) markLoop() {
@@ -225,7 +244,8 @@ func (a *Agent) Tick(ctx context.Context) {
 	a.reload()
 	if a.cfg.Mode == config.ModeOff {
 		a.withdraw(ctx)
-		a.metrics.isLeader.Set(0)
+		a.metrics.linkUp.Reset()
+		a.metrics.records.Set(0)
 		a.logChange("decision", slog.LevelInfo, "threek is off", "")
 		return
 	}

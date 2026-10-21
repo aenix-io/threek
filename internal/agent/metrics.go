@@ -15,6 +15,7 @@ import (
 
 type metrics struct {
 	registry        *prometheus.Registry
+	mode            *prometheus.GaugeVec
 	linkUp          *prometheus.GaugeVec
 	isLeader        prometheus.Gauge
 	transfers       *prometheus.CounterVec
@@ -27,6 +28,10 @@ type metrics struct {
 func newMetrics() *metrics {
 	m := &metrics{
 		registry: prometheus.NewRegistry(),
+		mode: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "threek_mode",
+			Help: "The agent's current mode: 1 for the active one. Other metrics describe only a mode other than off.",
+		}, []string{"mode"}),
 		linkUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "threek_link_up",
 			Help: "Whether the link from one member to another is up after hysteresis: 1 up, 0 down or unknown.",
@@ -57,7 +62,7 @@ func newMetrics() *metrics {
 		}),
 	}
 	m.registry.MustRegister(
-		m.linkUp, m.isLeader, m.transfers, m.dryRunTransfers, m.records, m.pollFailures, m.lastPoll,
+		m.mode, m.linkUp, m.isLeader, m.transfers, m.dryRunTransfers, m.records, m.pollFailures, m.lastPoll,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
