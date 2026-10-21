@@ -1,9 +1,11 @@
-// Package config reads threek settings from etcd's command line and environment.
+// Package config reads threek settings from etcd's command line and
+// environment, or from a mounted ConfigMap.
 package config
 
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +55,10 @@ type setting struct {
 	name string
 	set  func(c *Config, value string) error
 }
+
+// perMember settings differ between members of one cluster, so they cannot
+// come from a ConfigMap shared by the cluster.
+var perMember = map[string]bool{"identity": true, "metrics-listen": true}
 
 var settings = []setting{
 	{"mode", func(c *Config, v string) error {
@@ -176,4 +182,37 @@ func Parse(args, environ []string) (cfg Config, etcdArgs, etcdEnv []string, err 
 		return Config{}, nil, nil, errors.New("--threek-preferred-leader requires --threek-identity")
 	}
 	return cfg, etcdArgs, etcdEnv, nil
+}
+
+// FromDir reads the settings shared by every member of a cluster from a
+// mounted ConfigMap, one file per key. Settings without a file keep their
+// defaults, so an empty directory means threek is off.
+func FromDir(dir fs.FS) (Config, error) {
+	cfg := Default()
+	entries, err := fs.ReadDir(dir, ".")
+	if err != nil {
+		return Config{}, err
+	}
+	for _, e := range entries {
+		// kubelet keeps the ConfigMap's revisions in "..*" entries and links
+		// every key to the current one.
+		if strings.HasPrefix(e.Name(), "..") {
+			continue
+		}
+		s, ok := lookup(e.Name())
+		switch {
+		case !ok:
+			return Config{}, fmt.Errorf("unknown key %q", e.Name())
+		case perMember[s.name]:
+			return Config{}, fmt.Errorf("%q is set per member, not in the ConfigMap", e.Name())
+		}
+		value, err := fs.ReadFile(dir, e.Name())
+		if err != nil {
+			return Config{}, err
+		}
+		if err := s.set(&cfg, strings.TrimSpace(string(value))); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", e.Name(), err)
+		}
+	}
+	return cfg, nil
 }

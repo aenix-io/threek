@@ -1,9 +1,12 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -159,4 +162,119 @@ func equalStrings(a, b []string) bool {
 		return true
 	}
 	return reflect.DeepEqual(a, b)
+}
+
+func TestFromDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		files fstest.MapFS
+		want  func(*Config)
+	}{
+		{
+			name:  "empty directory of a missing optional ConfigMap",
+			files: fstest.MapFS{},
+			want:  func(*Config) {},
+		},
+		{
+			name: "every shared setting",
+			files: fstest.MapFS{
+				"mode":             {Data: []byte("enforce")},
+				"poll-interval":    {Data: []byte("2s")},
+				"down-after":       {Data: []byte("4")},
+				"up-after":         {Data: []byte("6")},
+				"move-after":       {Data: []byte("20s")},
+				"move-cooldown":    {Data: []byte("1m")},
+				"preferred-leader": {Data: []byte("zone-c")},
+				"prefer-after":     {Data: []byte("10m")},
+			},
+			want: func(c *Config) {
+				c.Mode = ModeEnforce
+				c.PollInterval = 2 * time.Second
+				c.DownAfter = 4
+				c.UpAfter = 6
+				c.MoveAfter = 20 * time.Second
+				c.MoveCooldown = time.Minute
+				c.PreferredLeader = "zone-c"
+				c.PreferAfter = 10 * time.Minute
+			},
+		},
+		{
+			name:  "surrounding whitespace of a YAML block scalar",
+			files: fstest.MapFS{"mode": {Data: []byte("dry-run\n")}},
+			want:  func(c *Config) { c.Mode = ModeDryRun },
+		},
+		{
+			name: "kubelet bookkeeping entries",
+			files: fstest.MapFS{
+				"..data":                         {Data: []byte("x")},
+				"..2026_10_21_12_00_00.1/mode":   {Data: []byte("enforce")},
+				"mode":                           {Data: []byte("dry-run")},
+				"..2026_10_21_12_00_00.1/ignore": {Data: []byte("x")},
+			},
+			want: func(c *Config) { c.Mode = ModeDryRun },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := Default()
+			tt.want(&want)
+			got, err := FromDir(tt.files)
+			if err != nil {
+				t.Fatalf("FromDir() error = %v", err)
+			}
+			if got != want {
+				t.Errorf("config = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestFromDirErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		files fstest.MapFS
+		want  string
+	}{
+		{name: "unknown key", files: fstest.MapFS{"mod": {Data: []byte("enforce")}}, want: `unknown key "mod"`},
+		{name: "bad value", files: fstest.MapFS{"mode": {Data: []byte("on")}}, want: `mode: must be one of off, dry-run, enforce`},
+		{name: "identity differs per member", files: fstest.MapFS{"identity": {Data: []byte("zone-a")}}, want: `"identity" is set per member`},
+		{name: "metrics address belongs to the container", files: fstest.MapFS{"metrics-listen": {Data: []byte(":2390")}}, want: `"metrics-listen" is set per member`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := FromDir(tt.files)
+			if err == nil {
+				t.Fatalf("FromDir() error = nil, want %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("FromDir() error = %q, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// kubelet mounts every key as a symlink through ..data to the current
+// revision, and swaps ..data atomically on update.
+func TestFromDirKubeletLayout(t *testing.T) {
+	dir := t.TempDir()
+	revision := filepath.Join(dir, "..2026_10_21_12_00_00.1")
+	if err := os.Mkdir(revision, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(revision, "mode"), []byte("enforce"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(revision), filepath.Join(dir, "..data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "mode"), filepath.Join(dir, "mode")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FromDir(os.DirFS(dir))
+	if err != nil {
+		t.Fatalf("FromDir() error = %v", err)
+	}
+	if got.Mode != ModeEnforce {
+		t.Errorf("mode = %s, want enforce", got.Mode)
+	}
 }
