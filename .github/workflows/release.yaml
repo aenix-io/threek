@@ -37,11 +37,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: ref
-        name: Image reference
+        name: Image references
         env:
           TAG: ${{ github.ref_name }}
           ETCD_VERSION: ${{ matrix.etcd }}
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY}:${TAG}-etcd${ETCD_VERSION#v}" >> "${GITHUB_OUTPUT}"
+        # The second tag is the form etcd-operator builds from spec.version
+        # and spec.imageTagSuffix: v<etcd version><suffix>.
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY}"
+          etcd="${ETCD_VERSION#v}"
+          {
+            echo "image=${repo}:${TAG}-etcd${etcd}"
+            echo "tags<<TAGS"
+            echo "${repo}:${TAG}-etcd${etcd}"
+            echo "${repo}:v${etcd}-threek.${TAG#v}"
+            echo "TAGS"
+          } >> "${GITHUB_OUTPUT}"
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -51,7 +62,7 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
             ETCD_VERSION=${{ matrix.etcd }}
-          tags: ${{ steps.ref.outputs.image }}
+          tags: ${{ steps.ref.outputs.tags }}
           provenance: mode=max
           sbom: true
           push: true
@@ -82,7 +93,7 @@ jobs:
             echo "## Images"
             echo
             for v in $(echo "${ETCD_VERSIONS}" | jq --raw-output '.[]'); do
-              echo "- \`ghcr.io/${GITHUB_REPOSITORY}:${TAG}-etcd${v#v}\`"
+              echo "- \`ghcr.io/${GITHUB_REPOSITORY}:${TAG}-etcd${v#v}\`, also tagged \`v${v#v}-threek.${TAG#v}\` for etcd-operator"
             done
             echo
             echo "Images are signed with cosign keyless signing:"
