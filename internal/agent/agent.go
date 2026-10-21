@@ -61,7 +61,8 @@ type Prober interface {
 }
 
 // Run connects to the local member and runs the agent until ctx is done.
-func Run(ctx context.Context, cfg config.Config, settings etcdconf.Settings, logger *slog.Logger) error {
+// With a non-nil load, the configuration is reloaded before every poll.
+func Run(ctx context.Context, cfg config.Config, load func() (config.Config, error), settings etcdconf.Settings, logger *slog.Logger) error {
 	c, err := cluster.New(settings)
 	if err != nil {
 		return err
@@ -72,7 +73,11 @@ func Run(ctx context.Context, cfg config.Config, settings etcdconf.Settings, log
 		return err
 	}
 	defer p.Close()
-	return New(cfg, c, p, logger, time.Now).Run(ctx)
+	a := New(cfg, c, p, logger, time.Now)
+	if load != nil {
+		a.WatchConfig(load)
+	}
+	return a.Run(ctx)
 }
 
 type Agent struct {

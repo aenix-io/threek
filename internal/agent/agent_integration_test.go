@@ -38,7 +38,7 @@ func TestPreferredLeaderOnRealCluster(t *testing.T) {
 		cfg.PreferredLeader = "zone-" + preferred.Name
 		logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 		agents.Go(func() {
-			if err := Run(ctx, cfg, m.Settings, logger); err != nil {
+			if err := Run(ctx, cfg, nil, m.Settings, logger); err != nil {
 				t.Errorf("agent of %s: %v", m.Name, err)
 			}
 		})

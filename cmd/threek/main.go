@@ -119,7 +119,7 @@ func runAgent(cfg config.Config, etcdArgs, etcdEnv []string, logger *slog.Logger
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if err := agent.Run(ctx, cfg, settings, logger); err != nil {
+	if err := agent.Run(ctx, cfg, nil, settings, logger); err != nil {
 		logger.Error("agent stopped", "error", err)
 		return 1
 	}
