@@ -39,6 +39,8 @@ type options struct {
 	// shared holds the shared settings given as flags, used without a
 	// config directory.
 	shared config.Config
+	// waitFor makes the process only wait for these files and exit.
+	waitFor []string
 }
 
 // parseOptions writes flag errors and the usage to output.
@@ -56,6 +58,10 @@ func parseOptions(args []string, getenv func(string) string, output io.Writer) (
 	fs.StringVar(&opts.identity, "identity", getenv("THREEK_IDENTITY"), "label of this member, unique within the cluster")
 	fs.StringVar(&opts.configDir, "config-dir", "", "directory of the mounted threek ConfigMap, reloaded on every poll")
 	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "address for the Prometheus endpoint; empty disables it")
+	fs.Func("wait-for", "wait until this file exists, then exit; repeatable", func(path string) error {
+		opts.waitFor = append(opts.waitFor, path)
+		return nil
+	})
 	opts.shared = config.Default()
 	var sharedFlags []string
 	for _, name := range config.Shared() {
@@ -96,17 +102,28 @@ func (o options) load() (config.Config, error) {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil)).With("logger", "threek", "component", "agent")
 	opts, err := parseOptions(os.Args[1:], os.Getenv, os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
-		return
+		return 0
 	}
 	if err != nil {
 		logger.Error("invalid arguments", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	if len(opts.waitFor) > 0 {
+		if err := waitFor(ctx, opts.waitFor, time.Second, logger); err != nil {
+			logger.Error("files did not appear", "error", err)
+			return 1
+		}
+		return 0
+	}
 
 	// The agent starts off and takes its mode from the first reload.
 	initial := config.Default()
@@ -115,6 +132,7 @@ func main() {
 	keepRunning(ctx, func(ctx context.Context) error {
 		return agent.Run(ctx, initial, opts.load, opts.settings, logger)
 	}, logger, retryDelay, remindAfter)
+	return 0
 }
 
 // keepRunning restarts run until ctx is done. An error that repeats, such as
@@ -139,6 +157,33 @@ func keepRunning(ctx context.Context, run func(context.Context) error, logger *s
 		case <-ctx.Done():
 			return
 		case <-time.After(delay):
+		}
+	}
+}
+
+// waitFor returns once every path is a regular file. It only looks at the
+// files: an init container uses it to hold back a container that mounts them,
+// because the runtime would create a directory in place of a missing one.
+func waitFor(ctx context.Context, paths []string, interval time.Duration, logger *slog.Logger) error {
+	var logged string
+	for {
+		var missing []string
+		for _, p := range paths {
+			if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
+				missing = append(missing, p)
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		if key := fmt.Sprint(missing); key != logged {
+			logged = key
+			logger.Info("waiting for files", "missing", missing)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%v not regular files: %w", missing, ctx.Err())
+		case <-time.After(interval):
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -242,5 +243,57 @@ func TestHelpListsTheFlags(t *testing.T) {
 		if !strings.Contains(out.String(), name) {
 			t.Errorf("usage lacks %s:\n%s", name, out.String())
 		}
+	}
+}
+
+func TestWaitForReturnsOnceEveryFileExists(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{filepath.Join(dir, "etcd-client.crt"), filepath.Join(dir, "etcd-client.key")}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	done := make(chan error, 1)
+	go func() { done <- waitFor(context.Background(), paths, time.Millisecond, logger) }()
+
+	time.Sleep(20 * time.Millisecond)
+	write(t, dir, "etcd-client.crt", "x")
+	select {
+	case err := <-done:
+		t.Fatalf("waitFor() returned %v with a file still missing", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	write(t, dir, "etcd-client.key", "x")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitFor() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitFor() did not return once every file existed")
+	}
+	if !strings.Contains(logs.String(), "waiting for files") {
+		t.Errorf("the wait is not logged:\n%s", logs.String())
+	}
+}
+
+func TestWaitForDoesNotTakeADirectoryForAFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "etcd-client.crt")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := waitFor(ctx, []string{path}, time.Millisecond, slog.New(slog.NewJSONHandler(io.Discard, nil))); err == nil {
+		t.Error("waitFor() error = nil for a directory in place of the file")
+	}
+}
+
+func TestWaitForFlag(t *testing.T) {
+	opts, err := parseOptions([]string{"--wait-for=/a", "--wait-for=/b"}, func(string) string { return "" }, io.Discard)
+	if err != nil {
+		t.Fatalf("parseOptions() error = %v", err)
+	}
+	if !slices.Equal(opts.waitFor, []string{"/a", "/b"}) {
+		t.Errorf("wait for = %v", opts.waitFor)
 	}
 }
