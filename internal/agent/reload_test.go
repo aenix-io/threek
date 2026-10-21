@@ -200,3 +200,20 @@ func TestReloadedPollInterval(t *testing.T) {
 		t.Errorf("status called %d times in 300ms, want the reloaded 10ms interval", n)
 	}
 }
+
+// Without a peer CA every probe of an https peer fails, which would read as a
+// member that reaches nobody.
+func TestPeerTLSWithoutCAFailsThePoll(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	h.fake.noPeerCA = true
+	h.ticks(3)
+	if _, ok := h.fake.records[1]; ok {
+		t.Error("a record was published from probes that cannot succeed")
+	}
+	if got := testutil.ToFloat64(h.agent.metrics.pollFailures); got != 3 {
+		t.Errorf("poll failures = %v, want 3", got)
+	}
+	if n := strings.Count(h.logs.String(), "--peer-trusted-ca-file"); n != 1 {
+		t.Errorf("the missing peer CA is logged %d times, want once:\n%s", n, h.logs)
+	}
+}

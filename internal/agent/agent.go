@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,8 +35,8 @@ const (
 	recordTTL       = 10 * time.Second
 	transferTimeout = 30 * time.Second
 	// stallTimeout is how long the poll loop may go without completing a poll
-	// before the agent exits for the supervisor to restart it. Every call in
-	// a poll has a timeout, so only a bug can get near it.
+	// before the agent exits for kubelet to restart it. Every call in a poll
+	// has a timeout, so only a bug can get near it.
 	stallTimeout  = 30 * time.Second
 	revokeTimeout = 2 * time.Second
 	// maxAppliedLag is how far behind the leader a member may be and still be
@@ -58,6 +60,8 @@ type Cluster interface {
 
 type Prober interface {
 	Reachable(ctx context.Context, peerURLs []string) bool
+	// VerifiesTLS reports whether the prober can verify peers that serve TLS.
+	VerifiesTLS() bool
 }
 
 // Run connects to the local member and runs the agent until ctx is done.
@@ -222,8 +226,8 @@ func (a *Agent) markLoop() {
 }
 
 // watchdog ends the process when the poll loop stops making progress. A
-// stalled agent never touches etcd, but it silently stops protecting it; the
-// supervisor restarts an agent that exits.
+// stalled agent never touches etcd, but it silently stops protecting it;
+// kubelet restarts an agent that exits.
 func (a *Agent) watchdog(ctx context.Context) {
 	ticker := time.NewTicker(a.stallTimeout / 4)
 	defer ticker.Stop()
@@ -287,9 +291,13 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	}
 	var voters []cluster.Member
 	for _, m := range members {
-		if !m.IsLearner {
-			voters = append(voters, m)
+		if m.IsLearner {
+			continue
 		}
+		if !a.prober.VerifiesTLS() && slices.ContainsFunc(m.PeerURLs, func(u string) bool { return strings.HasPrefix(u, "https://") }) {
+			return engine.Observation{}, errors.New("peers serve TLS but --peer-trusted-ca-file is not set, so no probe can succeed")
+		}
+		voters = append(voters, m)
 	}
 
 	leading := local.Leader == local.MemberID

@@ -94,8 +94,8 @@ The sidecar itself is part of the Pod, and that has two consequences:
 - etcd starts after the sidecar has started, so a member waits while the agent image cannot be pulled. The agent image belongs in the same mirror as etcd's.
 - The sidecar counts toward the Pod's readiness. While the agent is not running, the Pod is not ready: the member leaves the client Service and counts as disrupted for the PodDisruptionBudget. Raft is not affected.
 
-The agent therefore never exits on its own errors. Invalid settings, missing certificates or an unreachable etcd are logged and retried while it keeps running.
-Only the watchdog ends it, when the poll loop stops making progress, and kubelet restarts it.
+The agent therefore keeps running through errors it can recover from: an invalid ConfigMap, missing certificates or an unreachable etcd are logged and retried.
+It exits on invalid flags, which the policy sets and a restart would not fix, and when the watchdog finds the poll loop stalled; kubelet restarts it.
 
 Settings shared by the members come from the ConfigMap, one key per setting, and are read again before every poll.
 kubelet updates the mounted files within a minute or two of a change, without restarting any container.

@@ -136,3 +136,23 @@ func TestRealEtcdPeer(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifiesTLS(t *testing.T) {
+	plain, err := New(etcdconf.Settings{}, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.VerifiesTLS() {
+		t.Error("VerifiesTLS() = true without a peer CA")
+	}
+	dir := t.TempDir()
+	ca := etcdtest.NewCA(t, dir)
+	cert, key := ca.Issue(t, dir, "agent")
+	p, err := New(etcdconf.Settings{PeerCertFile: cert, PeerKeyFile: key, PeerTrustedCAFile: ca.CertFile}, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.VerifiesTLS() {
+		t.Error("VerifiesTLS() = false with a peer CA")
+	}
+}

@@ -44,6 +44,7 @@ type fakeCluster struct {
 	moveErr     error
 	localErr    error
 	hang        chan struct{}
+	noPeerCA    bool
 	moves       []uint64
 	statusCalls []string
 }
@@ -230,6 +231,8 @@ func (f *fakeCluster) movesSoFar() []uint64 {
 
 // fakeProber probes from member 1 through fakeCluster's links.
 type fakeProber struct{ f *fakeCluster }
+
+func (p fakeProber) VerifiesTLS() bool { return !p.f.noPeerCA }
 
 func (p fakeProber) Reachable(_ context.Context, peerURLs []string) bool {
 	p.f.mu.Lock()

@@ -20,8 +20,9 @@ import (
 const path = "/raft/probing"
 
 type Prober struct {
-	client  *http.Client
-	timeout time.Duration
+	client      *http.Client
+	timeout     time.Duration
+	verifiesTLS bool
 }
 
 // New returns a prober that authenticates with the member's peer certificate
@@ -36,9 +37,16 @@ func New(s etcdconf.Settings, timeout time.Duration) (*Prober, error) {
 		}
 	}
 	return &Prober{
-		client:  &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}},
-		timeout: timeout,
+		client:      &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}},
+		timeout:     timeout,
+		verifiesTLS: tlsConfig != nil,
 	}, nil
+}
+
+// VerifiesTLS reports whether a peer CA was given, without which no peer
+// serving TLS can be verified.
+func (p *Prober) VerifiesTLS() bool {
+	return p.verifiesTLS
 }
 
 func (p *Prober) Close() {
