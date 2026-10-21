@@ -294,7 +294,7 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		if m.IsLearner {
 			continue
 		}
-		if !a.prober.VerifiesTLS() && slices.ContainsFunc(m.PeerURLs, func(u string) bool { return strings.HasPrefix(u, "https://") }) {
+		if !a.prober.VerifiesTLS() && slices.ContainsFunc(m.PeerURLs, servesTLS) {
 			return engine.Observation{}, errors.New("peers serve TLS but --peer-trusted-ca-file is not set, so no probe can succeed")
 		}
 		voters = append(voters, m)
@@ -355,6 +355,12 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		}
 	}
 	return obs, nil
+}
+
+// servesTLS reports whether an etcd URL uses one of the TLS schemes etcd
+// accepts.
+func servesTLS(url string) bool {
+	return strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "unixs://")
 }
 
 // healthy reports whether member m belongs to the local cluster and can take

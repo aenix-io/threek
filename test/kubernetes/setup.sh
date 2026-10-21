@@ -18,7 +18,7 @@ node_image=()
 if [[ -n "${NODE_IMAGE:-}" ]]; then
   node_image=(--image "${NODE_IMAGE}")
 fi
-"${kind}" create cluster --name "${cluster}" --config "${here}/kind.yaml" "${node_image[@]}" --wait 2m
+"${kind}" create cluster --name "${cluster}" --config "${here}/kind.yaml" ${node_image[@]+"${node_image[@]}"} --wait 2m
 "${kind}" load docker-image --name "${cluster}" "${agent_image}"
 
 kubectl --context "${context}" apply --server-side \

@@ -217,3 +217,16 @@ func TestPeerTLSWithoutCAFailsThePoll(t *testing.T) {
 		t.Errorf("the missing peer CA is logged %d times, want once:\n%s", n, h.logs)
 	}
 }
+
+func TestServesTLS(t *testing.T) {
+	for url, want := range map[string]bool{
+		"https://10.0.0.1:2380":  true,
+		"unixs://etcd.sock:2380": true,
+		"http://10.0.0.1:2380":   false,
+		"unix://etcd.sock:2380":  false,
+	} {
+		if got := servesTLS(url); got != want {
+			t.Errorf("servesTLS(%q) = %v, want %v", url, got, want)
+		}
+	}
+}
