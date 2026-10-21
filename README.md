@@ -111,6 +111,7 @@ The agent serves its metrics on port 2390 of the Pod (`threek-metrics`).
 ### Talos
 
 The agent runs as a static Pod on every control-plane node, from [`deploy/talos-static-pod.yaml`](deploy/talos-static-pod.yaml) or the copy attached to each release.
+The document needs Talos 1.14 or later; on earlier versions put the same Pod under `machine.pods`.
 Talos keeps running etcd from its own image and upgrades it as usual.
 
 - Set `--identity` per node and apply the document as a machine config patch to each control-plane node:

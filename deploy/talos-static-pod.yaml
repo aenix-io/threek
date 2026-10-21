@@ -5,8 +5,10 @@
 #   talosctl --nodes <node> patch machineconfig --patch @talos-static-pod.yaml
 #
 # The agent authenticates with the etcd client certificate Talos issues to
-# kube-apiserver. Only its three files are mounted: the same directory holds
-# the API server's own keys. Changing the document restarts the agent only.
+# kube-apiserver, and picks it up from that Pod's secrets directory. Changing
+# the document restarts the agent only.
+#
+# Talos 1.14 and later. On earlier versions put the Pod under machine.pods.
 apiVersion: v1alpha1
 kind: KubeStaticPodConfig
 name: threek-agent
@@ -59,24 +61,18 @@ pod:
           capabilities:
             drop: ["ALL"]
         volumeMounts:
-          - name: etcd-client-crt
-            mountPath: /etc/threek/etcd-client.crt
+          - name: kube-apiserver-secrets
+            mountPath: /etc/threek
             readOnly: true
-          - name: etcd-client-key
-            mountPath: /etc/threek/etcd-client.key
-            readOnly: true
-          - name: etcd-client-ca
-            mountPath: /etc/threek/etcd-client-ca.crt
-            readOnly: true
+    # The whole directory, not its files: Talos writes the files on every boot,
+    # and a container started before that would get a directory created in
+    # place of a missing file, which then keeps Talos from writing it and
+    # kube-apiserver from starting. A missing directory created that way does
+    # no harm. The directory also holds the API server's own keys; an etcd
+    # client certificate already gives full access to the cluster's data.
     # No hostPath type: kubelet would check it in its own mount namespace,
     # which does not include /system.
     volumes:
-      - name: etcd-client-crt
+      - name: kube-apiserver-secrets
         hostPath:
-          path: /system/secrets/kubernetes/kube-apiserver/etcd-client.crt
-      - name: etcd-client-key
-        hostPath:
-          path: /system/secrets/kubernetes/kube-apiserver/etcd-client.key
-      - name: etcd-client-ca
-        hostPath:
-          path: /system/secrets/kubernetes/kube-apiserver/etcd-client-ca.crt
+          path: /system/secrets/kubernetes/kube-apiserver
