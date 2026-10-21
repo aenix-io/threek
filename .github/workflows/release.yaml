@@ -67,6 +67,9 @@ jobs:
   agent-image:
     runs-on: ubuntu-latest
     needs: ci
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -114,6 +117,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pin the agent image in the policy
+        env:
+          IMAGE: ${{ needs.agent-image.outputs.image }}
+          DIGEST: ${{ needs.agent-image.outputs.digest }}
+        run: |
+          sed --regexp-extended "s|\"ghcr.io/[^\"]+/threek-agent:[^\"]+\"|\"${IMAGE}@${DIGEST}\"|" \
+            deploy/threek-agent.yaml > threek-agent.yaml
+          grep --quiet --fixed-strings "${IMAGE}@${DIGEST}" threek-agent.yaml
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -123,7 +135,7 @@ jobs:
           {
             echo "## Images"
             echo
-            echo "Sidecar agent for Kubernetes:"
+            echo "Sidecar agent for Kubernetes, injected by the policy attached to this release:"
             echo
             echo "- \`ghcr.io/${GITHUB_REPOSITORY}-agent:${TAG}\`"
             echo
@@ -146,4 +158,5 @@ jobs:
             prerelease=(--prerelease)
           fi
           gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft --verify-tag \
-            --title "${TAG}" --notes-file notes.md --generate-notes "${prerelease[@]}"
+            --title "${TAG}" --notes-file notes.md --generate-notes "${prerelease[@]}" \
+            threek-agent.yaml
