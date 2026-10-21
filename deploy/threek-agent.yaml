@@ -34,12 +34,13 @@ spec:
     - name: etcd-member
       expression: object.spec.containers.exists(c, c.name == "etcd")
     # Self-signed peer certificates cannot be verified: an agent there would
-    # see no peer at all.
+    # see no peer at all. The pattern follows Go's syntax for a true boolean
+    # flag, which etcd uses.
     - name: no-peer-auto-tls
       expression: >-
         !object.spec.containers.exists(c, c.name == "etcd" &&
-          ((has(c.command) && c.command.exists(a, a.startsWith("--peer-auto-tls"))) ||
-           (has(c.args) && c.args.exists(a, a.startsWith("--peer-auto-tls")))))
+          ((has(c.command) ? c.command : []) + (has(c.args) ? c.args : [])).exists(a,
+            a.matches("^--?peer-auto-tls(=(1|t|T|TRUE|true|True))?$")))
     - name: not-injected
       expression: >-
         !has(object.spec.initContainers) ||

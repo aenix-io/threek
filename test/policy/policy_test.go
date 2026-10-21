@@ -61,8 +61,12 @@ func memberPod(labels map[string]string, tls, restore bool) map[string]any {
 	}
 	spec := map[string]any{
 		"automountServiceAccountToken": false,
-		"containers":                   []any{map[string]any{"name": "etcd", "image": "registry.k8s.io/etcd:3.6.4-0"}},
-		"volumes":                      volumes,
+		"containers": []any{map[string]any{
+			"name":    "etcd",
+			"image":   "registry.k8s.io/etcd:3.6.4-0",
+			"command": []any{"etcd", "--name=etcd-abcde", "--listen-peer-urls=https://0.0.0.0:2380", "--peer-client-cert-auth=true"},
+		}},
+		"volumes": volumes,
 	}
 	if restore {
 		spec["initContainers"] = []any{map[string]any{"name": "restore", "image": "registry.k8s.io/etcd:3.6.4-0"}}
@@ -221,6 +225,23 @@ func TestKeepsGuaranteedQoS(t *testing.T) {
 	}
 }
 
+func withEtcdFlag(flag string) map[string]any {
+	manifest := memberPod(nil, false, false)
+	etcd := manifest["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	etcd["command"] = append(etcd["command"].([]any), flag)
+	return manifest
+}
+
+func TestInjectsWithPeerAutoTLSOff(t *testing.T) {
+	for _, flag := range []string{"--peer-auto-tls=false", "-peer-auto-tls=0", "--peer-auto-tls-other"} {
+		t.Run(flag, func(t *testing.T) {
+			if _, ok := agentOf(admit(t, withEtcdFlag(flag))); !ok {
+				t.Error("no agent")
+			}
+		})
+	}
+}
+
 func TestNodeIdentity(t *testing.T) {
 	p := admit(t, memberPod(map[string]string{"threek.aenix.io/identity": "node"}, true, false))
 	agent, ok := agentOf(p)
@@ -243,9 +264,9 @@ func TestLeavesOtherPodsAlone(t *testing.T) {
 	cases["without an etcd container"] = notEtcd
 	// Self-signed peer certificates cannot be verified, so the agent would
 	// see no peer at all.
-	autoTLS := memberPod(nil, false, false)
-	autoTLS["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["command"] = []any{"etcd", "--name=etcd-abcde", "--peer-auto-tls"}
-	cases["with peer auto TLS"] = autoTLS
+	for _, flag := range []string{"--peer-auto-tls", "-peer-auto-tls", "--peer-auto-tls=true", "-peer-auto-tls=1"} {
+		cases["with "+flag] = withEtcdFlag(flag)
+	}
 	for name, manifest := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, ok := agentOf(admit(t, manifest)); ok {
