@@ -79,8 +79,22 @@ cluster:
 
 ### etcd-operator
 
-threek needs two features in [cozystack/etcd-operator](https://github.com/cozystack/etcd-operator): `spec.extraArgs` and a per-member `THREEK_IDENTITY` environment variable from the downward API.
-Extra arguments apply only to new members, so changing the mode means rolling the members.
+[cozystack/etcd-operator](https://github.com/cozystack/etcd-operator) selects the image per cluster with `spec.imageRepository` and `spec.imageTagSuffix` and passes threek's flags with `spec.extraArgs`.
+Every image is also published under the tag `v<etcd version>-threek.<threek version>`, which is the form the operator builds:
+
+```yaml
+apiVersion: etcd-operator.cozystack.io/v1alpha2
+kind: EtcdCluster
+spec:
+  version: "3.6.1"
+  imageRepository: ghcr.io/aenix-io/threek
+  imageTagSuffix: -threek.0.1.0
+  extraArgs:
+    threek-mode: dry-run
+```
+
+The operator copies these settings onto existing members without restarting them: delete the Pods one at a time to move a cluster onto threek or to change its mode.
+This needs an etcd-operator version that supports `spec.extraArgs`, `spec.imageRepository` and `spec.imageTagSuffix`.
 
 ## Configuration
 
@@ -103,9 +117,10 @@ Every release publishes one image per supported etcd version, for `linux/amd64` 
 
 ```text
 ghcr.io/aenix-io/threek:<threek version>-etcd<etcd version>
+ghcr.io/aenix-io/threek:v<etcd version>-threek.<threek version without "v">
 ```
 
-Tags are never moved. Images carry provenance and an SBOM, and are signed with cosign keyless signing:
+Both tags point to the same image; the second one is for [etcd-operator](#etcd-operator). Tags are never moved. Images carry provenance and an SBOM, and are signed with cosign keyless signing:
 
 ```bash
 cosign verify ghcr.io/aenix-io/threek:<threek version>-etcd<etcd version> \

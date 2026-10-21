@@ -269,25 +269,29 @@ cluster:
 
 ### etcd-operator (cozystack/etcd-operator)
 
-Requires support in the operator:
+The operator builds the etcd image as `<repository>:v<spec.version><suffix>` and keeps the tag pinned to `spec.version`.
+threek uses three operator features:
 
-- `spec.extraArgs` with a denylist of operator-managed flags;
-- a `THREEK_IDENTITY` environment variable on the etcd container from the downward API, because `extraArgs` is shared by every member while the identity is not:
-  - node name: `fieldRef: spec.nodeName`, always available;
-  - zone: `fieldRef: metadata.labels['topology.kubernetes.io/zone']`, only when the cluster copies node topology labels to pods ([KEP-4742](https://github.com/kubernetes/enhancements/issues/4742));
-- the threek image set explicitly in the operator configuration.
-
-The operator applies extra arguments only to new members, so switching `dry-run` to `enforce` means rolling the members one by one.
+- `spec.imageRepository` and `spec.imageTagSuffix` select the threek image for one cluster. Every release publishes each image also under `v<etcd version>-threek.<threek version>` for this;
+- `spec.extraArgs` passes the `--threek-*` flags, with a denylist of the flags the operator manages;
+- the operator copies these settings onto existing members without restarting them, so deleting the Pods one at a time moves a cluster onto threek, changes its mode, or rolls it back.
 
 ```yaml
 apiVersion: etcd-operator.cozystack.io/v1alpha2
 kind: EtcdCluster
 spec:
-  version: "3.6.5"
+  version: "3.6.1"
+  imageRepository: ghcr.io/aenix-io/threek
+  imageTagSuffix: -threek.0.1.0
   extraArgs:
     threek-mode: dry-run
-    threek-preferred-leader: zone-c
 ```
+
+The preferred leader needs a per-member `THREEK_IDENTITY`, because `extraArgs` is shared by every member while the identity is not.
+The operator does not set per-member environment variables yet. When it does, the identity would come from the downward API:
+
+- node name: `fieldRef: spec.nodeName`, always available;
+- zone: `fieldRef: metadata.labels['topology.kubernetes.io/zone']`, only when the cluster copies node topology labels to pods ([KEP-4742](https://github.com/kubernetes/enhancements/issues/4742)).
 
 The operator's restore init container runs from the same image, so the image must keep `etcdutl`.
 
