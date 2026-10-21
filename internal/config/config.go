@@ -199,20 +199,40 @@ func FromDir(dir fs.FS) (Config, error) {
 		if strings.HasPrefix(e.Name(), "..") {
 			continue
 		}
-		s, ok := lookup(e.Name())
-		switch {
-		case !ok:
-			return Config{}, fmt.Errorf("unknown key %q", e.Name())
-		case perMember[s.name]:
-			return Config{}, fmt.Errorf("%q is set per member, not in the ConfigMap", e.Name())
-		}
 		value, err := fs.ReadFile(dir, e.Name())
 		if err != nil {
 			return Config{}, err
 		}
-		if err := s.set(&cfg, strings.TrimSpace(string(value))); err != nil {
-			return Config{}, fmt.Errorf("%s: %w", e.Name(), err)
+		if err := cfg.Set(e.Name(), strings.TrimSpace(string(value))); err != nil {
+			return Config{}, err
 		}
 	}
 	return cfg, nil
+}
+
+// Shared returns the names of the settings shared by every member of a
+// cluster, in the order of the configuration reference.
+func Shared() []string {
+	var names []string
+	for _, s := range settings {
+		if !perMember[s.name] {
+			names = append(names, s.name)
+		}
+	}
+	return names
+}
+
+// Set applies a shared setting by name.
+func (c *Config) Set(name, value string) error {
+	s, ok := lookup(name)
+	switch {
+	case !ok:
+		return fmt.Errorf("unknown key %q", name)
+	case perMember[name]:
+		return fmt.Errorf("%q is set per member, not shared by the cluster", name)
+	}
+	if err := s.set(c, value); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
 }

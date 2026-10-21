@@ -1,6 +1,7 @@
-// Command threek-agent runs the threek agent as a sidecar container next to
-// etcd. Settings shared by the cluster come from a mounted ConfigMap and are
-// reloaded on every poll.
+// Command threek-agent runs the threek agent next to etcd: as a sidecar
+// container, with the settings shared by the cluster in a mounted ConfigMap
+// that is reloaded on every poll, or as a static Pod with every setting in
+// flags.
 package main
 
 import (
@@ -35,6 +36,9 @@ type options struct {
 	identity      string
 	configDir     string
 	metricsListen string
+	// shared holds the shared settings given as flags, used without a
+	// config directory.
+	shared config.Config
 }
 
 func parseOptions(args []string, getenv func(string) string) (options, error) {
@@ -49,22 +53,38 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	fs.StringVar(&opts.settings.PeerKeyFile, "peer-key-file", "", "key for probing peer URLs")
 	fs.StringVar(&opts.settings.PeerTrustedCAFile, "peer-trusted-ca-file", "", "CA that signed the peer certificates")
 	fs.StringVar(&opts.identity, "identity", getenv("THREEK_IDENTITY"), "label of this member, unique within the cluster")
-	fs.StringVar(&opts.configDir, "config-dir", "/etc/threek", "directory of the mounted threek ConfigMap")
+	fs.StringVar(&opts.configDir, "config-dir", "", "directory of the mounted threek ConfigMap, reloaded on every poll")
 	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "address for the Prometheus endpoint; empty disables it")
+	opts.shared = config.Default()
+	var sharedFlags []string
+	for _, name := range config.Shared() {
+		fs.Func(name, "shared setting, used without --config-dir", func(value string) error {
+			sharedFlags = append(sharedFlags, name)
+			return opts.shared.Set(name, value)
+		})
+	}
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
-	if fs.NArg() > 0 {
+	switch {
+	case fs.NArg() > 0:
 		return options{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	case opts.configDir != "" && len(sharedFlags) > 0:
+		return options{}, fmt.Errorf("--%s cannot be combined with --config-dir", sharedFlags[0])
+	case opts.shared.PreferredLeader != "" && opts.identity == "":
+		return options{}, errors.New("--preferred-leader requires --identity")
 	}
 	opts.settings.ListenClientURLs = []string{*endpoint}
 	return opts, nil
 }
 
 func (o options) load() (config.Config, error) {
-	cfg, err := config.FromDir(os.DirFS(o.configDir))
-	if err != nil {
-		return config.Config{}, err
+	cfg := o.shared
+	if o.configDir != "" {
+		var err error
+		if cfg, err = config.FromDir(os.DirFS(o.configDir)); err != nil {
+			return config.Config{}, err
+		}
 	}
 	if cfg.PreferredLeader != "" && o.identity == "" {
 		return config.Config{}, errors.New("preferred-leader requires --identity")

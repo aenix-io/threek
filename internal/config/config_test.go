@@ -278,3 +278,28 @@ func TestFromDirKubeletLayout(t *testing.T) {
 		t.Errorf("mode = %s, want enforce", got.Mode)
 	}
 }
+
+func TestSet(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Set("mode", "enforce"); err != nil {
+		t.Fatalf("Set(mode) error = %v", err)
+	}
+	if err := cfg.Set("move-after", "20s"); err != nil {
+		t.Fatalf("Set(move-after) error = %v", err)
+	}
+	if cfg.Mode != ModeEnforce || cfg.MoveAfter != 20*time.Second {
+		t.Errorf("config = %+v", cfg)
+	}
+	for name, value := range map[string]string{"mod": "enforce", "mode": "on", "identity": "zone-a"} {
+		if err := cfg.Set(name, value); err == nil {
+			t.Errorf("Set(%s, %s) error = nil", name, value)
+		}
+	}
+}
+
+func TestShared(t *testing.T) {
+	want := []string{"mode", "poll-interval", "down-after", "up-after", "move-after", "move-cooldown", "preferred-leader", "prefer-after"}
+	if got := Shared(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Shared() = %v, want %v", got, want)
+	}
+}

@@ -56,8 +56,12 @@ func TestParseOptionsDefaults(t *testing.T) {
 	if got := opts.settings.ListenClientURLs; len(got) != 1 || got[0] != "https://127.0.0.1:2379" {
 		t.Errorf("endpoint = %q, want https://127.0.0.1:2379", got)
 	}
-	if opts.configDir != "/etc/threek" {
-		t.Errorf("config dir = %q, want /etc/threek", opts.configDir)
+	if opts.configDir != "" {
+		t.Errorf("config dir = %q, want none", opts.configDir)
+	}
+	cfg, err := opts.load()
+	if err != nil || cfg.Mode != config.ModeOff {
+		t.Errorf("load() = %+v, %v; want threek off", cfg, err)
 	}
 }
 
@@ -73,6 +77,32 @@ func TestIdentityFlagWinsOverEnvironment(t *testing.T) {
 
 func TestParseOptionsErrors(t *testing.T) {
 	for _, args := range [][]string{{"--threek-mode=enforce"}, {"stray"}} {
+		if _, err := parseOptions(args, func(string) string { return "" }); err == nil {
+			t.Errorf("parseOptions(%q) error = nil", args)
+		}
+	}
+}
+
+func TestSettingsFromFlags(t *testing.T) {
+	opts, err := parseOptions([]string{"--identity=zone-a", "--mode=enforce", "--preferred-leader=zone-c", "--move-after=20s"}, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("parseOptions() error = %v", err)
+	}
+	cfg, err := opts.load()
+	if err != nil {
+		t.Fatalf("load() error = %v", err)
+	}
+	if cfg.Mode != config.ModeEnforce || cfg.PreferredLeader != "zone-c" || cfg.MoveAfter != 20*time.Second || cfg.Identity != "zone-a" {
+		t.Errorf("config = %+v", cfg)
+	}
+}
+
+func TestSettingsFromFlagsErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--mode=on"},
+		{"--config-dir=/etc/threek", "--mode=enforce"},
+		{"--preferred-leader=zone-c"},
+	} {
 		if _, err := parseOptions(args, func(string) string { return "" }); err == nil {
 			t.Errorf("parseOptions(%q) error = nil", args)
 		}
