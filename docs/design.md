@@ -38,7 +38,7 @@ Goals:
 - move the leader to a member that reaches every other member when a partial partition occurs;
 - optionally keep the leader on a preferred member during normal operation;
 - run upstream etcd unmodified, with unmodified arguments;
-- be invisible to the systems that launch etcd (Talos, etcd-operator): same binary path, same arguments, same exit codes;
+- need no changes in the systems that launch etcd (Talos, etcd-operator);
 - one mechanism for every etcd cluster, so all clusters on the same sites converge to the same member during a partition.
 
 Non-goals:
@@ -61,7 +61,47 @@ Properties:
 
 ## Architecture
 
-### Image layout
+The agent is one program with two ways to run:
+
+| Platform | Delivery | Settings |
+| --- | --- | --- |
+| Kubernetes with etcd-operator | `threek-agent` sidecar, injected by a MutatingAdmissionPolicy | flags set by the policy, plus a ConfigMap reloaded on every poll |
+| Talos | etcd image whose `etcd` binary is the threek supervisor | `--threek-*` flags among etcd's own |
+
+Talos has no Pod to add a container to, and its machine config only chooses the etcd image and its arguments, so there the agent has to come with etcd.
+On Kubernetes a sidecar keeps etcd's image, version and arguments under the operator's control, and the mode changes without restarting etcd.
+
+### Kubernetes sidecar
+
+`deploy/threek-agent.yaml` holds the policy. It acts on the creation of Pods that carry `threek.aenix.io/inject: "true"`, the operator's `etcd-operator.cozystack.io/cluster` label and an `etcd` container.
+etcd-operator copies `spec.additionalMetadata.labels` to member Pods, so the operator needs no changes.
+
+The policy appends a native sidecar (an init container with `restartPolicy: Always`) that:
+
+- shares the Pod's network namespace, so its probes take the same path as etcd's traffic;
+- mounts the member's `tls-client` and `tls-peer` volumes when they exist, and connects over plain HTTP when they do not;
+- takes `THREEK_IDENTITY` from the downward API: the Pod's `topology.kubernetes.io/zone` label, which Kubernetes copies from the node at binding ([KEP-4742](https://github.com/kubernetes/enhancements/issues/4742), on by default since 1.35), or `spec.nodeName` with `threek.aenix.io/identity: node`;
+- mounts the ConfigMap `<cluster>-threek` as an optional volume.
+
+Volume names and mount paths are internals of etcd-operator, not its API. The policy tests pin the layout the policy expects.
+
+The policy fails open (`failurePolicy: Ignore`): an error in it creates the member without the agent.
+The sidecar itself is part of the Pod, and that has two consequences:
+
+- etcd starts after the sidecar has started, so a member waits while the agent image cannot be pulled. The agent image belongs in the same mirror as etcd's.
+- The sidecar counts toward the Pod's readiness. While the agent is not running, the Pod is not ready: the member leaves the client Service and counts as disrupted for the PodDisruptionBudget. Raft is not affected.
+
+The agent therefore never exits on its own errors. Invalid settings, missing certificates or an unreachable etcd are logged and retried while it keeps running.
+Only the watchdog ends it, when the poll loop stops making progress, and kubelet restarts it.
+
+Settings shared by the members come from the ConfigMap, one key per setting, and are read again before every poll.
+kubelet updates the mounted files within a minute or two of a change, without restarting any container.
+
+- A missing ConfigMap or a missing `mode` key means `off`: the agent publishes nothing and makes no calls to etcd.
+- An invalid ConfigMap is logged once, and the previous settings stay.
+- Switching on after `off` starts with an empty link history, because links seen before say nothing about the links now.
+
+### Talos image
 
 threek ships as an etcd image in which the `etcd` binary is replaced:
 
@@ -98,13 +138,14 @@ Supervisor behavior:
 The agent also exits when its poll loop completes no poll for 30 s, so the supervisor restarts an agent that hangs instead of crashing.
 Every call in a poll has a timeout, so only a bug can trigger this.
 
-The agent has no liveness or readiness probe of its own.
-Kubernetes and Talos probes act on the whole container, so failing one for the agent would restart etcd.
+In the image the agent has no liveness or readiness probe of its own.
+Talos probes act on the whole container, so failing one for the agent would restart etcd.
 The container's probes keep checking etcd, which the agent never affects.
 
 ### Reading etcd settings
 
 The agent needs a few etcd settings: client and peer TLS files and client URLs.
+The sidecar receives them as flags from the policy. In the Talos image the agent reads them from etcd's own configuration:
 etcd accepts settings from flags (`-flag`, `--flag`, `--flag=value`, `--flag value`), from `ETCD_*` environment variables and from `--config-file`.
 The agent resolves its subset using etcd's own precedence rules and never rewrites them.
 
@@ -132,6 +173,7 @@ Link state uses hysteresis:
 etcd exports `etcd_network_active_peers` per peer, and reading it would have avoided probing.
 It does not notice a blackholed peer: etcd sets the read timeout of its peer streams on a dialer that `net/http` ignores, so a stream to a peer that stopped answering stays "active" until TCP gives up on it, which takes minutes.
 The end-to-end tests showed exactly that, so threek measures reachability itself.
+The fix is proposed upstream in [etcd-io/etcd#22639](https://github.com/etcd-io/etcd/pull/22639); released etcd versions keep the bug.
 
 ### Sharing views
 
@@ -219,25 +261,28 @@ All defaults are starting points and are to be tuned on a test bench.
 
 ## Configuration
 
-Settings are extra etcd flags. The supervisor removes them before starting etcd, otherwise etcd would reject the unknown flags.
-Every flag has an environment fallback with the same name (`--threek-mode` ↔ `THREEK_MODE`). The flag wins.
-The environment is meant for values that differ per member and come from the Kubernetes downward API.
-
-| Flag | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `--threek-mode` | `off` | `off`: plain etcd, no agent. `dry-run`: decide and log, never transfer. `enforce`: transfer. |
-| `--threek-poll-interval` | `1s` | how often the agent probes its peers and polls etcd |
-| `--threek-down-after` | `3` | consecutive failed probes before a link is down |
-| `--threek-up-after` | `10` | consecutive successful probes before a link is up |
-| `--threek-move-after` | `15s` | how long a link stays down before a partition transfer |
-| `--threek-move-cooldown` | `2m` | minimum leadership tenure before this agent transfers leadership away |
-| `--threek-identity` | empty | label of this member: a zone or a node name, unique within the cluster |
-| `--threek-preferred-leader` | empty | identity that holds the leader in normal operation; empty means no preference |
-| `--threek-prefer-after` | `5m` | how long connectivity must be full before returning to the preferred leader |
-| `--threek-metrics-listen` | empty | address for the agent's Prometheus endpoint; empty disables it |
+| `mode` | `off` | `off`: no agent activity. `dry-run`: decide and log, never transfer. `enforce`: transfer. |
+| `poll-interval` | `1s` | how often the agent probes its peers and polls etcd |
+| `down-after` | `3` | consecutive failed probes before a link is down |
+| `up-after` | `10` | consecutive successful probes before a link is up |
+| `move-after` | `15s` | how long a link stays down before a partition transfer |
+| `move-cooldown` | `2m` | minimum leadership tenure before this agent transfers leadership away |
+| `identity` | empty | label of this member: a zone or a node name, unique within the cluster |
+| `preferred-leader` | empty | identity that holds the leader in normal operation; empty means no preference |
+| `prefer-after` | `5m` | how long connectivity must be full before returning to the preferred leader |
+| `metrics-listen` | empty | address for the agent's Prometheus endpoint; empty disables it |
 
-`off` is the default, so the image is a plain etcd until threek is enabled explicitly.
-Rolling back is a flag change, not an image change.
+`off` is the default, so threek does nothing until it is enabled explicitly.
+
+**Sidecar.** `identity` and `metrics-listen` differ per member and are flags of `threek-agent`, set by the policy (`--identity` falls back to `THREEK_IDENTITY`).
+Every other setting is a key of the ConfigMap; the ConfigMap may not set the per-member ones.
+The remaining flags of `threek-agent` point at etcd: `--endpoint`, `--cert-file`, `--key-file`, `--trusted-ca-file`, `--peer-cert-file`, `--peer-key-file`, `--peer-trusted-ca-file` and `--config-dir`.
+
+**Talos image.** Every setting is an extra etcd flag with the `threek-` prefix, such as `--threek-mode`. The supervisor removes them before starting etcd, otherwise etcd would reject the unknown flags.
+Every flag has an environment fallback with the same name (`--threek-mode` ↔ `THREEK_MODE`). The flag wins.
+With `--threek-mode=off` the image is a plain etcd, so rolling back is a flag change, not an image change.
 
 ### Choosing the identity
 
@@ -269,43 +314,46 @@ cluster:
 
 ### etcd-operator (cozystack/etcd-operator)
 
-Requires support in the operator:
-
-- `spec.extraArgs` with a denylist of operator-managed flags;
-- a `THREEK_IDENTITY` environment variable on the etcd container from the downward API, because `extraArgs` is shared by every member while the identity is not:
-  - node name: `fieldRef: spec.nodeName`, always available;
-  - zone: `fieldRef: metadata.labels['topology.kubernetes.io/zone']`, only when the cluster copies node topology labels to pods ([KEP-4742](https://github.com/kubernetes/enhancements/issues/4742));
-- the threek image set explicitly in the operator configuration.
-
-The operator applies extra arguments only to new members, so switching `dry-run` to `enforce` means rolling the members one by one.
+- Apply the policy from the release, which pins the agent image by digest. It needs Kubernetes 1.36, or 1.35 with the `MutatingAdmissionPolicy` feature gate and the `admissionregistration.k8s.io/v1beta1` API.
+- Label the cluster through `spec.additionalMetadata.labels`. The operator labels new Pods only, so the members are rolled once to get the sidecar.
+- Create the ConfigMap `<cluster>-threek`. Switching `dry-run` to `enforce` afterwards is a ConfigMap edit.
 
 ```yaml
 apiVersion: etcd-operator.cozystack.io/v1alpha2
 kind: EtcdCluster
+metadata:
+  name: etcd
 spec:
-  version: "3.6.5"
-  extraArgs:
-    threek-mode: dry-run
-    threek-preferred-leader: zone-c
+  additionalMetadata:
+    labels:
+      threek.aenix.io/inject: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etcd-threek
+data:
+  mode: dry-run
+  preferred-leader: zone-c
 ```
-
-The operator's restore init container runs from the same image, so the image must keep `etcdutl`.
 
 ## Security
 
-- The agent listens on nothing by default. It only connects to the client and peer URLs of its own cluster's members.
+- The agent listens on nothing but its optional metrics endpoint, which the policy enables on port 2390 of the Pod. It only connects to the client and peer URLs of its own cluster's members.
 - It authenticates with the member's own certificates and verifies other members with the member's own CAs. A member of another cluster signed by a different CA is rejected by TLS. Clusters that share a CA are told apart by the cluster ID check described in [Sharing views](#sharing-views).
 - The agent writes only its own record under `/threek/members/`.
-- The optional metrics endpoint is plain HTTP and exposes no secrets. Bind it to a trusted address.
+- The metrics endpoint is plain HTTP and exposes no secrets. Bind it to a trusted address.
+- The sidecar runs as a non-root user with a read-only root filesystem, no capabilities and the `RuntimeDefault` seccomp profile, and needs no Kubernetes API access.
 
 ## Observability
 
 Logs: every decision, including "no action" after a state change, is logged once with its reason and the reachability view that led to it.
 
-Metrics, when `--threek-metrics-listen` is set:
+Metrics, when `metrics-listen` is set:
 
 | Metric | Meaning |
 | --- | --- |
+| `threek_mode{mode}` | 1 for the active mode; the metrics below describe only a mode other than `off` |
 | `threek_link_up{from,to}` | link state after hysteresis, as seen by this agent: 1 up, 0 down or unknown |
 | `threek_is_leader` | whether the local member is the leader |
 | `threek_transfers_total{reason,result}` | transfers attempted, by reason and result |
@@ -316,7 +364,7 @@ Metrics, when `--threek-metrics-listen` is set:
 
 The endpoint also serves the Go runtime and process metrics of the agent.
 The agent serves it, not the supervisor, so it is unavailable while the agent restarts.
-The supervisor logs every agent restart.
+The supervisor logs every agent restart; on Kubernetes, kubelet counts the sidecar's restarts.
 
 ## Versioning and upgrades
 
@@ -337,7 +385,8 @@ Every supported etcd minor version is covered by the integration and end-to-end 
 Every pull request runs:
 
 - **Unit tests** for the decision engine. It is a pure function, so each scenario from the table above is a table-driven case, including flapping, unknown rows, duplicate identities, learners and cooldown.
-- **Unit tests** for argument handling: every etcd flag syntax, `ETCD_*` environment, `--config-file`, removal of `--threek-*`.
+- **Unit tests** for argument handling: every etcd flag syntax, `ETCD_*` environment, `--config-file`, removal of `--threek-*`, and the ConfigMap layout kubelet mounts.
+- **Unit tests** for reloading: mode switches without restart, invalid settings keep the previous ones, `off` withdraws the record and forgets the link history.
 - **Supervisor tests**: signal forwarding, exit codes, `exec` for non-server invocations, agent crash isolation (etcd must survive).
 - **Integration tests** against real etcd processes with mTLS: the etcd client calls, the probes and the return to the preferred leader with three agents.
 - **End-to-end tests**: three members of the threek image in containers, run as Talos runs etcd, with links broken by `iptables` drop rules. They assert that:
@@ -345,6 +394,8 @@ Every pull request runs:
   - the leader settles on the preferred member, leaves it when the preferred member is the one cut off, and returns after the partition heals;
   - nothing moves on a site failure, on a partition between followers, on a link that flaps for shorter than `--threek-down-after` probes, or in `dry-run`;
   - the image exits like upstream etcd on stop.
+
+- **Policy tests**: `deploy/threek-agent.yaml` on a kind cluster of every supported Kubernetes minor version, with Pods laid out as etcd-operator builds them, through server-side dry runs: the sidecar, its arguments, mounts and identity, and Pods the policy must leave alone.
 
 Integration and end-to-end tests run against every supported etcd minor version.
 
@@ -384,7 +435,8 @@ It does not prove that Raft messages flow, for example through a path with a bro
 | A separate mechanism that pins leaders to the witness | covered by the preferred leader, with automatic departure when the witness is the one cut off |
 | etcd with PreVote disabled | endless elections between the two sides of the partition |
 | etcd fork with `ForgetLeader` | the same effect as an external `move-leader`, at the cost of maintaining a fork |
-| Sidecar or static pod next to etcd | a different mechanism per platform, separate credentials, changes to pod specs and network policies |
+| The etcd image on Kubernetes too | etcd-operator would need free-form etcd flags, a per-cluster image and per-member environment; the image would tie etcd's security fixes to threek releases, a mode change would restart every member, and the agent would share etcd's memory limit |
+| Mutating webhook instead of the policy | a service with its own certificates to run, and a failure mode in the admission path of every member Pod |
 | Agent-to-agent reports over a separate port | a new port in every firewall and network policy and a listening agent; records in etcd carry the same reports over existing ports |
 | etcd's transport metrics (`etcd_network_active_peers`) | blind to blackholed peers for minutes, see [Why not etcd's own transport state](#why-not-etcds-own-transport-state) |
 | memberlist (SWIM) | its indirect probes deliberately hide partial partitions, which is exactly what threek has to detect |

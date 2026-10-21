@@ -13,7 +13,8 @@ metadata:
   name: threek-agent
 spec:
   # A policy error must never stop an etcd member from being created: the
-  # member then starts without the agent.
+  # member then starts without the agent. This does not cover the agent image:
+  # a native sidecar starts before etcd, so etcd waits for that image too.
   failurePolicy: Ignore
   reinvocationPolicy: Never
   matchConstraints:
