@@ -143,7 +143,13 @@ func start(t *testing.T, agentFlags ...string) *cluster {
 			"--peer-trusted-ca-file=" + pki + "/ca.crt",
 		}
 		mustDocker(t, args...)
-		t.Cleanup(func() { _, _ = docker("rm", "--force", m.container) })
+		t.Cleanup(func() {
+			if t.Failed() {
+				logs, _ := exec.Command("docker", "logs", "--tail", "60", m.container).CombinedOutput()
+				t.Logf("etcd logs of %s:\n%s", m.name, logs)
+			}
+			_, _ = docker("rm", "--force", m.container)
+		})
 
 		agent := []string{
 			"run", "--detach", "--name", m.agent,

@@ -6,10 +6,6 @@ on:
     branches:
       - main
   workflow_call:
-    outputs:
-      etcd-versions:
-        description: JSON list of supported etcd versions
-        value: ${{ jobs.etcd-versions.outputs.versions }}
 
 permissions:
   contents: read
@@ -165,6 +161,8 @@ jobs:
       - name: Build image
         run: make image IMAGE=threek-agent:e2e VERSION=e2e
       - name: Prepare a kind cluster
+        env:
+          NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
         run: |
           go install sigs.k8s.io/kind@v0.33.0
           test/kubernetes/setup.sh threek-e2e threek-agent:e2e

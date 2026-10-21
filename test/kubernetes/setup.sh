@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepares a kind cluster for the Kubernetes end-to-end tests: cert-manager,
 # etcd-operator and the threek policy injecting AGENT_IMAGE, which is loaded
-# into the nodes.
+# into the nodes. NODE_IMAGE, if set, picks the kind node image.
 #
 # Usage: test/kubernetes/setup.sh <kind cluster name> <agent image>
 set -o errexit -o nounset -o pipefail
@@ -14,7 +14,11 @@ context="kind-${cluster}"
 here=$(cd "$(dirname "$0")" && pwd)
 kind=${KIND:-kind}
 
-"${kind}" create cluster --name "${cluster}" --config "${here}/kind.yaml" --wait 2m
+node_image=()
+if [[ -n "${NODE_IMAGE:-}" ]]; then
+  node_image=(--image "${NODE_IMAGE}")
+fi
+"${kind}" create cluster --name "${cluster}" --config "${here}/kind.yaml" "${node_image[@]}" --wait 2m
 "${kind}" load docker-image --name "${cluster}" "${agent_image}"
 
 kubectl --context "${context}" apply --server-side \

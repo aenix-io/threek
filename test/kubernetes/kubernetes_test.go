@@ -50,6 +50,12 @@ type env struct {
 	namespace string
 }
 
+// with returns the environment for subtest t, so failures and cleanups
+// belong to it.
+func (e *env) with(t *testing.T) *env {
+	return &env{t: t, namespace: e.namespace}
+}
+
 func (e *env) kubectl(args ...string) (string, error) {
 	return run("kubectl", append([]string{"--context", kubeContext, "--namespace", e.namespace}, args...)...)
 }
@@ -285,6 +291,7 @@ func TestOperatorClusterWithAgent(t *testing.T) {
 	pods := e.pods()
 
 	t.Run("the agent starts with the member's certificates", func(t *testing.T) {
+		e := e.with(t)
 		for _, p := range pods {
 			if !e.logged(p.Metadata.Name, "agent started", nil) || e.logged(p.Metadata.Name, "agent stopped, restarting", nil) {
 				t.Errorf("agent of %s did not start cleanly:\n%s", p.Metadata.Name, e.agentLogs(p.Metadata.Name))
@@ -293,6 +300,7 @@ func TestOperatorClusterWithAgent(t *testing.T) {
 	})
 
 	t.Run("the mode changes without restarting etcd", func(t *testing.T) {
+		e := e.with(t)
 		e.setConfig(map[string]string{"mode": "dry-run"})
 		eventually(t, 4*time.Minute, "every agent in dry-run with its zone published", func() (bool, string) {
 			for _, p := range pods {
@@ -322,6 +330,7 @@ func TestOperatorClusterWithAgent(t *testing.T) {
 	})
 
 	t.Run("enforce moves the leader away from a partial partition", func(t *testing.T) {
+		e := e.with(t)
 		e.setConfig(map[string]string{"mode": "enforce", "move-cooldown": "0s", "move-after": "10s"})
 		eventually(t, 4*time.Minute, "every agent in enforce", func() (bool, string) {
 			for _, p := range pods {
@@ -360,5 +369,8 @@ func TestOperatorClusterWithAgent(t *testing.T) {
 			}
 			return got == witness.Metadata.Name, "leader " + got
 		})
+		if !e.logged(leader.Metadata.Name, "leadership transferred", map[string]string{"reason": "partition"}) {
+			t.Errorf("the agent of %s did not log the transfer:\n%s", leader.Metadata.Name, e.agentLogs(leader.Metadata.Name))
+		}
 	})
 }
