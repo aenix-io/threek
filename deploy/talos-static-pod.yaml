@@ -1,0 +1,82 @@
+# Runs the threek agent as a static Pod on a Talos control-plane node, next to
+# the etcd that Talos runs from its stock image. Apply it as a machine config
+# patch to every control-plane node, with that node's identity, for example:
+#
+#   talosctl --nodes <node> patch machineconfig --patch @talos-static-pod.yaml
+#
+# The agent authenticates with the etcd client certificate Talos issues to
+# kube-apiserver. Only its three files are mounted: the same directory holds
+# the API server's own keys. Changing the document restarts the agent only.
+apiVersion: v1alpha1
+kind: KubeStaticPodConfig
+name: threek-agent
+pod:
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: threek-agent
+    namespace: kube-system
+    labels:
+      app.kubernetes.io/name: threek-agent
+  spec:
+    # Probes must take the same path as etcd's peer traffic.
+    hostNetwork: true
+    priorityClassName: system-node-critical
+    securityContext:
+      runAsNonRoot: true
+      # Owner of the certificate files Talos writes for kube-apiserver.
+      runAsUser: 65534
+      runAsGroup: 65534
+      seccompProfile:
+        type: RuntimeDefault
+    containers:
+      - name: threek-agent
+        image: ghcr.io/aenix-io/threek-agent:v0.1.0
+        args:
+          - --endpoint=https://127.0.0.1:2379
+          - --cert-file=/etc/threek/etcd-client.crt
+          - --key-file=/etc/threek/etcd-client.key
+          - --trusted-ca-file=/etc/threek/etcd-client-ca.crt
+          # Talos verifies peers and clients with the same etcd CA, so the
+          # client certificate also passes the peer port's client auth.
+          - --peer-cert-file=/etc/threek/etcd-client.crt
+          - --peer-key-file=/etc/threek/etcd-client.key
+          - --peer-trusted-ca-file=/etc/threek/etcd-client-ca.crt
+          - --metrics-listen=127.0.0.1:2390
+          - --identity=zone-a              # unique per member
+          - --mode=dry-run
+          # - --preferred-leader=zone-c    # same on every member
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+          - name: etcd-client-crt
+            mountPath: /etc/threek/etcd-client.crt
+            readOnly: true
+          - name: etcd-client-key
+            mountPath: /etc/threek/etcd-client.key
+            readOnly: true
+          - name: etcd-client-ca
+            mountPath: /etc/threek/etcd-client-ca.crt
+            readOnly: true
+    # No hostPath type: kubelet would check it in its own mount namespace,
+    # which does not include /system.
+    volumes:
+      - name: etcd-client-crt
+        hostPath:
+          path: /system/secrets/kubernetes/kube-apiserver/etcd-client.crt
+      - name: etcd-client-key
+        hostPath:
+          path: /system/secrets/kubernetes/kube-apiserver/etcd-client.key
+      - name: etcd-client-ca
+        hostPath:
+          path: /system/secrets/kubernetes/kube-apiserver/etcd-client-ca.crt
