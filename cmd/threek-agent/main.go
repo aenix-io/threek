@@ -41,10 +41,11 @@ type options struct {
 	shared config.Config
 }
 
-func parseOptions(args []string, getenv func(string) string) (options, error) {
+// parseOptions writes flag errors and the usage to output.
+func parseOptions(args []string, getenv func(string) string, output io.Writer) (options, error) {
 	var opts options
 	fs := flag.NewFlagSet("threek-agent", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(output)
 	endpoint := fs.String("endpoint", "https://127.0.0.1:2379", "client URL of the local etcd member")
 	fs.StringVar(&opts.settings.CertFile, "cert-file", "", "client certificate for etcd")
 	fs.StringVar(&opts.settings.KeyFile, "key-file", "", "client key for etcd")
@@ -96,7 +97,10 @@ func (o options) load() (config.Config, error) {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil)).With("logger", "threek", "component", "agent")
-	opts, err := parseOptions(os.Args[1:], os.Getenv)
+	opts, err := parseOptions(os.Args[1:], os.Getenv, os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
 	if err != nil {
 		logger.Error("invalid arguments", "error", err)
 		os.Exit(2)

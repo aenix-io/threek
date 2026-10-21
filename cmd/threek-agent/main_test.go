@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,7 +29,7 @@ func TestParseOptions(t *testing.T) {
 		"--peer-trusted-ca-file=/tls/peer/ca.crt",
 		"--config-dir=/etc/threek",
 		"--metrics-listen=:2390",
-	}, func(name string) string { return map[string]string{"THREEK_IDENTITY": "zone-a"}[name] })
+	}, func(name string) string { return map[string]string{"THREEK_IDENTITY": "zone-a"}[name] }, io.Discard)
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
@@ -49,7 +51,7 @@ func TestParseOptions(t *testing.T) {
 }
 
 func TestParseOptionsDefaults(t *testing.T) {
-	opts, err := parseOptions(nil, func(string) string { return "" })
+	opts, err := parseOptions(nil, func(string) string { return "" }, io.Discard)
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
@@ -66,7 +68,7 @@ func TestParseOptionsDefaults(t *testing.T) {
 }
 
 func TestIdentityFlagWinsOverEnvironment(t *testing.T) {
-	opts, err := parseOptions([]string{"--identity=node-1"}, func(string) string { return "zone-a" })
+	opts, err := parseOptions([]string{"--identity=node-1"}, func(string) string { return "zone-a" }, io.Discard)
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
@@ -76,15 +78,15 @@ func TestIdentityFlagWinsOverEnvironment(t *testing.T) {
 }
 
 func TestParseOptionsErrors(t *testing.T) {
-	for _, args := range [][]string{{"--threek-mode=enforce"}, {"stray"}} {
-		if _, err := parseOptions(args, func(string) string { return "" }); err == nil {
+	for _, args := range [][]string{{"--bogus"}, {"--mode="}, {"stray"}} {
+		if _, err := parseOptions(args, func(string) string { return "" }, io.Discard); err == nil {
 			t.Errorf("parseOptions(%q) error = nil", args)
 		}
 	}
 }
 
 func TestSettingsFromFlags(t *testing.T) {
-	opts, err := parseOptions([]string{"--identity=zone-a", "--mode=enforce", "--preferred-leader=zone-c", "--move-after=20s"}, func(string) string { return "" })
+	opts, err := parseOptions([]string{"--identity=zone-a", "--mode=enforce", "--preferred-leader=zone-c", "--move-after=20s"}, func(string) string { return "" }, io.Discard)
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
@@ -103,7 +105,7 @@ func TestSettingsFromFlagsErrors(t *testing.T) {
 		{"--config-dir=/etc/threek", "--mode=enforce"},
 		{"--preferred-leader=zone-c"},
 	} {
-		if _, err := parseOptions(args, func(string) string { return "" }); err == nil {
+		if _, err := parseOptions(args, func(string) string { return "" }, io.Discard); err == nil {
 			t.Errorf("parseOptions(%q) error = nil", args)
 		}
 	}
@@ -227,5 +229,18 @@ func TestKeepRunningLogsAnErrorAgainAfterAStart(t *testing.T) {
 	}, logger, time.Millisecond, time.Hour)
 	if n := strings.Count(logs.String(), "no CA"); n != 2 {
 		t.Errorf("an error that came back logged %d times, want 2:\n%s", n, logs.String())
+	}
+}
+
+func TestHelpListsTheFlags(t *testing.T) {
+	var out bytes.Buffer
+	_, err := parseOptions([]string{"--help"}, func(string) string { return "" }, &out)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("parseOptions(--help) error = %v, want flag.ErrHelp", err)
+	}
+	for _, name := range []string{"-endpoint", "-mode", "-config-dir", "-peer-trusted-ca-file"} {
+		if !strings.Contains(out.String(), name) {
+			t.Errorf("usage lacks %s:\n%s", name, out.String())
+		}
 	}
 }
