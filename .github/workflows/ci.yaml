@@ -161,16 +161,21 @@ jobs:
         run: |
           sed "s|admissionregistration.k8s.io/v1\$|admissionregistration.k8s.io/${API}|" deploy/threek-agent.yaml \
             | kubectl --context kind-policy apply --filename -
+      - name: Wait for the API server to load the policy
+        run: |
+          canary='{"apiVersion":"v1","kind":"Pod","metadata":{"name":"canary","namespace":"default","labels":{"threek.aenix.io/inject":"true","etcd-operator.cozystack.io/cluster":"canary"}},"spec":{"automountServiceAccountToken":false,"containers":[{"name":"etcd","image":"etcd"}]}}'
+          for _ in $(seq 30); do
+            if echo "${canary}" | kubectl --context kind-policy create --dry-run=server --output jsonpath='{.spec.initContainers[*].name}' --filename - | grep --quiet threek-agent; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the policy was not loaded within a minute" >&2
+          exit 1
       - name: Test the policy
         env:
           POLICY_KUBE_CONTEXT: kind-policy
-        run: |
-          # The API server picks up a new policy asynchronously.
-          for _ in 1 2 3 4 5 6; do
-            go test -tags policy -count=1 ./test/policy/ && exit 0
-            sleep 5
-          done
-          exit 1
+        run: go test -tags policy -count=1 -v ./test/policy/
 
   markdown:
     runs-on: ubuntu-latest

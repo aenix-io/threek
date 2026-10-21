@@ -190,6 +190,18 @@ func TestInjectsIntoPlaintextMember(t *testing.T) {
 	}
 }
 
+func TestInjectsIntoPodWithoutVolumes(t *testing.T) {
+	manifest := memberPod(nil, false, false)
+	delete(manifest["spec"].(map[string]any), "volumes")
+	p := admit(t, manifest)
+	if _, ok := agentOf(p); !ok {
+		t.Fatalf("no agent in %v", names(p))
+	}
+	if len(p.Spec.Volumes) != 1 || p.Spec.Volumes[0].Name != "threek-config" {
+		t.Errorf("volumes = %+v, want only the ConfigMap", p.Spec.Volumes)
+	}
+}
+
 func TestNodeIdentity(t *testing.T) {
 	p := admit(t, memberPod(map[string]string{"threek.aenix.io/identity": "node"}, true, false))
 	agent, ok := agentOf(p)

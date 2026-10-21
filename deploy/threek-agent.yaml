@@ -78,6 +78,7 @@ spec:
       jsonPatch:
         expression: >-
           (has(object.spec.initContainers) ? [] : [JSONPatch{op: "add", path: "/spec/initContainers", value: []}]) +
+          (has(object.spec.volumes) ? [] : [JSONPatch{op: "add", path: "/spec/volumes", value: []}]) +
           [
             JSONPatch{
               op: "add",
@@ -109,6 +110,7 @@ spec:
                     allowPrivilegeEscalation: false,
                     readOnlyRootFilesystem: true,
                     runAsNonRoot: true,
+                    seccompProfile: Object.spec.initContainers.securityContext.seccompProfile{type: "RuntimeDefault"},
                     capabilities: Object.spec.initContainers.securityContext.capabilities{drop: ["ALL"]}
                   }
                 }
