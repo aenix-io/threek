@@ -356,6 +356,15 @@ func TestPreferredLeaderWaitsForEveryRow(t *testing.T) {
 	cl.expectNoTransfer(600)
 }
 
+// Link history survives new parameters: a preferred leader set after a long
+// stretch of full connectivity applies at once.
+func TestSetParamsKeepsLinkHistory(t *testing.T) {
+	cl := newCluster(t, params())
+	cl.expectNoTransfer(preferredTransferPoll)
+	cl.e.SetParams(preferred("zone-c"))
+	cl.expectTransferAt(1, c, ReasonPreferred)
+}
+
 func TestPartitionWinsOverPreferredLeader(t *testing.T) {
 	cl := newCluster(t, preferred("zone-b"))
 	cl.warmUp()

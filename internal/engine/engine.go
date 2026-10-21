@@ -134,6 +134,11 @@ func New(p Params) *Engine {
 	return &Engine{p: p, links: make(map[link]*tracker)}
 }
 
+// SetParams replaces the parameters and keeps the link and leadership state.
+func (e *Engine) SetParams(p Params) {
+	e.p = p
+}
+
 // Observe updates the state with o and decides what to do.
 func (e *Engine) Observe(o Observation) Decision {
 	e.trackLeadership(o)

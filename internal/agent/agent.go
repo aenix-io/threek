@@ -77,6 +77,7 @@ func Run(ctx context.Context, cfg config.Config, settings etcdconf.Settings, log
 
 type Agent struct {
 	cfg     config.Config
+	load    func() (config.Config, error)
 	c       Cluster
 	prober  Prober
 	logger  *slog.Logger
@@ -99,20 +100,12 @@ type Agent struct {
 
 func New(cfg config.Config, c Cluster, p Prober, logger *slog.Logger, now func() time.Time) *Agent {
 	return &Agent{
-		cfg:    cfg,
-		c:      c,
-		prober: p,
-		logger: logger,
-		now:    now,
-		engine: engine.New(engine.Params{
-			DownAfter:       cfg.DownAfter,
-			UpAfter:         cfg.UpAfter,
-			MoveAfter:       cfg.MoveAfter,
-			MoveCooldown:    cfg.MoveCooldown,
-			PreferAfter:     cfg.PreferAfter,
-			Identity:        cfg.Identity,
-			PreferredLeader: cfg.PreferredLeader,
-		}),
+		cfg:           cfg,
+		c:             c,
+		prober:        p,
+		logger:        logger,
+		now:           now,
+		engine:        engine.New(engineParams(cfg)),
 		metrics:       newMetrics(),
 		remoteTimeout: remoteTimeout,
 		pollTimeout:   pollTimeout,
@@ -141,11 +134,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer watchdog.Wait()
 	defer stopWatchdog()
 
-	ticker := time.NewTicker(a.cfg.PollInterval)
+	interval := a.cfg.PollInterval
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		a.Tick(ctx)
 		a.markLoop()
+		if a.cfg.PollInterval != interval {
+			interval = a.cfg.PollInterval
+			ticker.Reset(interval)
+		}
 		select {
 		case <-ctx.Done():
 			a.withdraw(ctx)
@@ -153,6 +151,42 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func engineParams(cfg config.Config) engine.Params {
+	return engine.Params{
+		DownAfter:       cfg.DownAfter,
+		UpAfter:         cfg.UpAfter,
+		MoveAfter:       cfg.MoveAfter,
+		MoveCooldown:    cfg.MoveCooldown,
+		PreferAfter:     cfg.PreferAfter,
+		Identity:        cfg.Identity,
+		PreferredLeader: cfg.PreferredLeader,
+	}
+}
+
+// WatchConfig makes the agent read its configuration from load before every
+// poll. An invalid configuration is logged and the previous one stays.
+func (a *Agent) WatchConfig(load func() (config.Config, error)) {
+	a.load = load
+}
+
+func (a *Agent) reload() {
+	if a.load == nil {
+		return
+	}
+	cfg, err := a.load()
+	if err != nil {
+		a.logChange("config", slog.LevelError, "invalid configuration, keeping the previous one", err.Error(), "error", err)
+		return
+	}
+	delete(a.lastLog, "config")
+	if cfg == a.cfg {
+		return
+	}
+	a.logger.Info("configuration changed", "mode", cfg.Mode, "preferredLeader", cfg.PreferredLeader)
+	a.cfg = cfg
+	a.engine.SetParams(engineParams(cfg))
 }
 
 func (a *Agent) markLoop() {
@@ -183,6 +217,13 @@ func (a *Agent) watchdog(ctx context.Context) {
 // Tick polls the cluster once, publishes the local view and acts on the
 // decision.
 func (a *Agent) Tick(ctx context.Context) {
+	a.reload()
+	if a.cfg.Mode == config.ModeOff {
+		a.withdraw(ctx)
+		a.metrics.isLeader.Set(0)
+		a.logChange("decision", slog.LevelInfo, "threek is off", "")
+		return
+	}
 	pollCtx, cancel := context.WithTimeout(ctx, a.pollTimeout)
 	obs, err := a.observe(pollCtx)
 	cancel()
@@ -351,6 +392,7 @@ func (a *Agent) withdraw(ctx context.Context) {
 	if err := a.c.RevokeLease(revokeCtx, a.lease); err != nil {
 		a.logger.Warn("withdraw member record", "error", err)
 	}
+	a.lease, a.published = 0, nil
 }
 
 func row(sees map[uint64]bool) map[engine.MemberID]bool {
