@@ -177,3 +177,25 @@ func TestKeepRunningLogsAnUnexpectedStop(t *testing.T) {
 		t.Errorf("a stop without an error is not logged:\n%s", logs.String())
 	}
 }
+
+// A successful start ends the previous error, so the same error coming back
+// later is news.
+func TestKeepRunningLogsAnErrorAgainAfterAStart(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	errs := []error{errors.New("no CA"), nil, errors.New("no CA"), nil}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	keepRunning(ctx, func(context.Context) error {
+		err := errs[calls]
+		calls++
+		if calls == len(errs) {
+			cancel()
+		}
+		return err
+	}, logger, time.Millisecond, time.Hour)
+	if n := strings.Count(logs.String(), "no CA"); n != 2 {
+		t.Errorf("an error that came back logged %d times, want 2:\n%s", n, logs.String())
+	}
+}
