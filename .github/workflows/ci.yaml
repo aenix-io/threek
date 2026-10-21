@@ -154,6 +154,25 @@ jobs:
           POLICY_KUBE_CONTEXT: kind-policy
         run: go test -tags policy -count=1 -v ./test/policy/
 
+  kubernetes:
+    runs-on: ubuntu-latest
+    name: etcd-operator end-to-end
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build image
+        run: make image IMAGE=threek-agent:e2e VERSION=e2e
+      - name: Prepare a kind cluster
+        run: |
+          go install sigs.k8s.io/kind@v0.33.0
+          test/kubernetes/setup.sh threek-e2e threek-agent:e2e
+      - name: Run end-to-end tests
+        env:
+          K8S_E2E_CONTEXT: kind-threek-e2e
+        run: go test -tags kubernetes -timeout 30m -v ./test/kubernetes/
+
   markdown:
     runs-on: ubuntu-latest
     steps:

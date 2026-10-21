@@ -1,0 +1,64 @@
+# A three-member etcd-operator cluster with client and peer mTLS from
+# cert-manager, one member per zone, opted in to threek. Applied into the
+# test's namespace.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: etcd-ca
+spec:
+  isCA: true
+  commonName: etcd-ca
+  secretName: etcd-ca-tls
+  usages:
+    - signing
+    - key encipherment
+    - cert sign
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: etcd-ca-issuer
+spec:
+  ca:
+    secretName: etcd-ca-tls
+---
+apiVersion: etcd-operator.cozystack.io/v1alpha2
+kind: EtcdCluster
+metadata:
+  name: etcd
+spec:
+  replicas: 3
+  version: "3.6.11"
+  storage:
+    size: 1Gi
+  additionalMetadata:
+    labels:
+      threek.aenix.io/inject: "true"
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          etcd-operator.cozystack.io/cluster: etcd
+  tls:
+    peer:
+      certManager:
+        issuerRef:
+          name: etcd-ca-issuer
+    client:
+      certManager:
+        serverIssuerRef:
+          name: etcd-ca-issuer
+        operatorClientIssuerRef:
+          name: etcd-ca-issuer
