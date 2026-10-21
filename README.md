@@ -69,7 +69,7 @@ With the defaults the leader moves about 20 seconds after the link fails.
 
 - Kubernetes 1.36 or later. On 1.35, enable the `MutatingAdmissionPolicy` feature gate and the `admissionregistration.k8s.io/v1beta1` API, and apply the policy with that API version.
 - [cozystack/etcd-operator](https://github.com/cozystack/etcd-operator) needs no changes. The policy relies on its member Pod layout (the `etcd` container, the `tls-client` and `tls-peer` volumes), which is not part of the operator's API.
-- The agent is a native sidecar: it starts before etcd and counts toward the Pod's readiness. If the agent image cannot be pulled, the member does not start, so mirror the image wherever etcd's own image is mirrored. A crashed agent makes the Pod not ready until it restarts.
+- The agent is a native sidecar that reserves 100m CPU and 128Mi of memory per member, with limits equal to requests so a Guaranteed member stays Guaranteed. It starts before etcd and counts toward the Pod's readiness. If the agent image cannot be pulled, the member does not start, so mirror the image wherever etcd's own image is mirrored. A crashed agent makes the Pod not ready until it restarts.
 
 Install the policy once per cluster, from the release:
 

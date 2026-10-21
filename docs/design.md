@@ -369,6 +369,7 @@ Metrics, when `metrics-listen` is set:
 The endpoint also serves the Go runtime and process metrics of the agent.
 The agent serves it, not the supervisor, so it is unavailable while the agent restarts.
 The supervisor logs every agent restart; on Kubernetes, kubelet counts the sidecar's restarts.
+A sidecar that cannot start, for example without a certificate, keeps retrying and serves no metrics, so alert on its scrape target being down as well; the error is repeated in its log every 10 minutes.
 
 ## Versioning and upgrades
 

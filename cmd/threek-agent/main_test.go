@@ -130,7 +130,7 @@ func TestKeepRunningLogsEachErrorOnce(t *testing.T) {
 			cancel()
 		}
 		return err
-	}, logger, time.Millisecond)
+	}, logger, time.Millisecond, time.Hour)
 	if calls != len(errs) {
 		t.Fatalf("run called %d times, want %d", calls, len(errs))
 	}
@@ -139,5 +139,41 @@ func TestKeepRunningLogsEachErrorOnce(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "refused") {
 		t.Errorf("a new error is not logged:\n%s", logs.String())
+	}
+}
+
+func TestKeepRunningRepeatsAPersistentError(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	keepRunning(ctx, func(context.Context) error {
+		calls++
+		if calls == 3 {
+			cancel()
+		}
+		return errors.New("no CA")
+	}, logger, time.Millisecond, 0)
+	if n := strings.Count(logs.String(), "no CA"); n != 2 {
+		t.Errorf("a persistent error logged %d times, want once per reminder:\n%s", n, logs.String())
+	}
+}
+
+func TestKeepRunningLogsAnUnexpectedStop(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	keepRunning(ctx, func(context.Context) error {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return nil
+	}, logger, time.Millisecond, time.Hour)
+	if !strings.Contains(logs.String(), "agent stopped unexpectedly") {
+		t.Errorf("a stop without an error is not logged:\n%s", logs.String())
 	}
 }

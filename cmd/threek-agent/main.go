@@ -20,10 +20,15 @@ import (
 	"github.com/aenix-io/threek/internal/etcdconf"
 )
 
-// retryDelay paces restarts of an agent that could not start. The sidecar
-// never exits on such errors: a sidecar that is not running makes the whole
-// Pod, and so the etcd member, not ready.
-const retryDelay = 10 * time.Second
+const (
+	// retryDelay paces restarts of an agent that could not start. The sidecar
+	// never exits on such errors: a sidecar that is not running makes the
+	// whole Pod, and so the etcd member, not ready.
+	retryDelay = 10 * time.Second
+	// remindAfter repeats an error that keeps the agent from starting, so it
+	// stays visible in recent logs.
+	remindAfter = 10 * time.Minute
+)
 
 type options struct {
 	settings      etcdconf.Settings
@@ -85,20 +90,25 @@ func main() {
 	initial.MetricsListen = opts.metricsListen
 	keepRunning(ctx, func(ctx context.Context) error {
 		return agent.Run(ctx, initial, opts.load, opts.settings, logger)
-	}, logger, retryDelay)
+	}, logger, retryDelay, remindAfter)
 }
 
 // keepRunning restarts run until ctx is done. An error that repeats, such as
-// a missing certificate, is logged once.
-func keepRunning(ctx context.Context, run func(context.Context) error, logger *slog.Logger, delay time.Duration) {
+// a missing certificate, is logged again only after remind.
+func keepRunning(ctx context.Context, run func(context.Context) error, logger *slog.Logger, delay, remind time.Duration) {
 	var last string
+	var loggedAt time.Time
 	for {
 		err := run(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		if err != nil && err.Error() != last {
-			last = err.Error()
+		switch {
+		case err == nil:
+			last = ""
+			logger.Error("agent stopped unexpectedly, restarting", "after", delay.String())
+		case err.Error() != last || time.Since(loggedAt) >= remind:
+			last, loggedAt = err.Error(), time.Now()
 			logger.Error("agent stopped, restarting", "error", err, "after", delay.String())
 		}
 		select {
