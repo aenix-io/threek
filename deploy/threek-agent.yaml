@@ -33,6 +33,13 @@ spec:
   matchConditions:
     - name: etcd-member
       expression: object.spec.containers.exists(c, c.name == "etcd")
+    # Self-signed peer certificates cannot be verified: an agent there would
+    # see no peer at all.
+    - name: no-peer-auto-tls
+      expression: >-
+        !object.spec.containers.exists(c, c.name == "etcd" &&
+          ((has(c.command) && c.command.exists(a, a.startsWith("--peer-auto-tls"))) ||
+           (has(c.args) && c.args.exists(a, a.startsWith("--peer-auto-tls")))))
     - name: not-injected
       expression: >-
         !has(object.spec.initContainers) ||
@@ -103,9 +110,10 @@ spec:
                     [Object.spec.initContainers.volumeMounts{name: "threek-config", mountPath: "/etc/threek", readOnly: true}] +
                     (variables.clientTLS ? [Object.spec.initContainers.volumeMounts{name: "tls-client", mountPath: "/etc/etcd/tls/client", readOnly: true}] : []) +
                     (variables.peerTLS ? [Object.spec.initContainers.volumeMounts{name: "tls-peer", mountPath: "/etc/etcd/tls/peer", readOnly: true}] : []),
+                  // Requests equal to limits keep a Guaranteed member Guaranteed.
                   resources: Object.spec.initContainers.resources{
-                    requests: {"cpu": "10m", "memory": "32Mi"},
-                    limits: {"memory": "128Mi"}
+                    requests: {"cpu": "100m", "memory": "128Mi"},
+                    limits: {"cpu": "100m", "memory": "128Mi"}
                   },
                   securityContext: Object.spec.initContainers.securityContext{
                     allowPrivilegeEscalation: false,

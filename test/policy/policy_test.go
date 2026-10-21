@@ -35,6 +35,9 @@ type container struct {
 }
 
 type pod struct {
+	Status struct {
+		QOSClass string `json:"qosClass"`
+	} `json:"status"`
 	Spec struct {
 		InitContainers []container `json:"initContainers"`
 		Volumes        []struct {
@@ -202,6 +205,22 @@ func TestInjectsIntoPodWithoutVolumes(t *testing.T) {
 	}
 }
 
+// A sidecar with requests below its limits would demote a Guaranteed member,
+// which is evicted last and may get exclusive CPUs, to Burstable.
+func TestKeepsGuaranteedQoS(t *testing.T) {
+	manifest := memberPod(nil, true, false)
+	etcd := manifest["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	resources := map[string]any{"cpu": "1", "memory": "1Gi"}
+	etcd["resources"] = map[string]any{"requests": resources, "limits": resources}
+	p := admit(t, manifest)
+	if _, ok := agentOf(p); !ok {
+		t.Fatalf("no agent in %v", names(p))
+	}
+	if p.Status.QOSClass != "Guaranteed" {
+		t.Errorf("QoS class = %q, want Guaranteed", p.Status.QOSClass)
+	}
+}
+
 func TestNodeIdentity(t *testing.T) {
 	p := admit(t, memberPod(map[string]string{"threek.aenix.io/identity": "node"}, true, false))
 	agent, ok := agentOf(p)
@@ -222,6 +241,11 @@ func TestLeavesOtherPodsAlone(t *testing.T) {
 	notEtcd := memberPod(nil, true, true)
 	notEtcd["spec"].(map[string]any)["containers"] = []any{map[string]any{"name": "snapshot", "image": "registry.k8s.io/etcd:3.6.4-0"}}
 	cases["without an etcd container"] = notEtcd
+	// Self-signed peer certificates cannot be verified, so the agent would
+	// see no peer at all.
+	autoTLS := memberPod(nil, false, false)
+	autoTLS["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["command"] = []any{"etcd", "--name=etcd-abcde", "--peer-auto-tls"}
+	cases["with peer auto TLS"] = autoTLS
 	for name, manifest := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, ok := agentOf(admit(t, manifest)); ok {

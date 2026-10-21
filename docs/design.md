@@ -81,7 +81,10 @@ The policy appends a native sidecar (an init container with `restartPolicy: Alwa
 - shares the Pod's network namespace, so its probes take the same path as etcd's traffic;
 - mounts the member's `tls-client` and `tls-peer` volumes when they exist, and connects over plain HTTP when they do not;
 - takes `THREEK_IDENTITY` from the downward API: the Pod's `topology.kubernetes.io/zone` label, which Kubernetes copies from the node at binding ([KEP-4742](https://github.com/kubernetes/enhancements/issues/4742), on by default since 1.35), or `spec.nodeName` with `threek.aenix.io/identity: node`;
-- mounts the ConfigMap `<cluster>-threek` as an optional volume.
+- mounts the ConfigMap `<cluster>-threek` as an optional volume;
+- requests as much CPU and memory as its limits, so a Guaranteed member stays Guaranteed.
+
+Members started with `--peer-auto-tls` are left alone: their self-signed peer certificates cannot be verified, see [Peer TLS](#peer-tls).
 
 Volume names and mount paths are internals of etcd-operator, not its API. The policy tests pin the layout the policy expects.
 
