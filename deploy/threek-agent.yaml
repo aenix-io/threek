@@ -1,0 +1,131 @@
+# Injects the threek agent as a native sidecar into etcd-operator member Pods
+# labeled threek.aenix.io/inject=true. Set the label through the cluster's
+# spec.additionalMetadata.labels. Requires Kubernetes 1.36 or later. On 1.35,
+# enable the MutatingAdmissionPolicy feature gate and the
+# admissionregistration.k8s.io/v1beta1 API, and apply this file with
+# apiVersion admissionregistration.k8s.io/v1beta1.
+#
+# The agent reads its mode from the ConfigMap <cluster>-threek in the Pod's
+# namespace and runs off while that ConfigMap does not exist.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: threek-agent
+spec:
+  # A policy error must never stop an etcd member from being created: the
+  # member then starts without the agent.
+  failurePolicy: Ignore
+  reinvocationPolicy: Never
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+    objectSelector:
+      matchExpressions:
+        - key: threek.aenix.io/inject
+          operator: In
+          values: ["true"]
+        - key: etcd-operator.cozystack.io/cluster
+          operator: Exists
+  matchConditions:
+    - name: etcd-member
+      expression: object.spec.containers.exists(c, c.name == "etcd")
+    - name: not-injected
+      expression: >-
+        !has(object.spec.initContainers) ||
+        !object.spec.initContainers.exists(c, c.name == "threek-agent")
+  variables:
+    - name: image
+      expression: '"ghcr.io/aenix-io/threek-agent:v0.1.0"'
+    - name: cluster
+      expression: object.metadata.labels["etcd-operator.cozystack.io/cluster"]
+    # Volume names and mount paths follow etcd-operator's member Pods. They
+    # are not part of the operator's API; the end-to-end tests pin them.
+    - name: clientTLS
+      expression: has(object.spec.volumes) && object.spec.volumes.exists(v, v.name == "tls-client")
+    - name: peerTLS
+      expression: has(object.spec.volumes) && object.spec.volumes.exists(v, v.name == "tls-peer")
+    # Zone labels reach Pods at binding through PodTopologyLabelsAdmission.
+    - name: identityField
+      expression: >-
+        "threek.aenix.io/identity" in object.metadata.labels &&
+        object.metadata.labels["threek.aenix.io/identity"] == "node"
+        ? "spec.nodeName"
+        : "metadata.labels['topology.kubernetes.io/zone']"
+    - name: args
+      expression: >-
+        [
+          "--endpoint=" + (variables.clientTLS ? "https" : "http") + "://127.0.0.1:2379",
+          "--config-dir=/etc/threek",
+          "--metrics-listen=:2390",
+        ] +
+        (variables.clientTLS ? [
+          "--cert-file=/etc/etcd/tls/client/tls.crt",
+          "--key-file=/etc/etcd/tls/client/tls.key",
+          "--trusted-ca-file=/etc/etcd/tls/client/ca.crt",
+        ] : []) +
+        (variables.peerTLS ? [
+          "--peer-cert-file=/etc/etcd/tls/peer/tls.crt",
+          "--peer-key-file=/etc/etcd/tls/peer/tls.key",
+          "--peer-trusted-ca-file=/etc/etcd/tls/peer/ca.crt",
+        ] : [])
+  mutations:
+    # JSONPatch rather than ApplyConfiguration: an apply configuration may not
+    # set atomic fields such as args.
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >-
+          (has(object.spec.initContainers) ? [] : [JSONPatch{op: "add", path: "/spec/initContainers", value: []}]) +
+          [
+            JSONPatch{
+              op: "add",
+              path: "/spec/initContainers/-",
+              value:
+                Object.spec.initContainers{
+                  name: "threek-agent",
+                  image: variables.image,
+                  restartPolicy: "Always",
+                  args: variables.args,
+                  env: [
+                    Object.spec.initContainers.env{
+                      name: "THREEK_IDENTITY",
+                      valueFrom: Object.spec.initContainers.env.valueFrom{
+                        fieldRef: Object.spec.initContainers.env.valueFrom.fieldRef{fieldPath: variables.identityField}
+                      }
+                    }
+                  ],
+                  ports: [Object.spec.initContainers.ports{name: "threek-metrics", containerPort: 2390}],
+                  volumeMounts:
+                    [Object.spec.initContainers.volumeMounts{name: "threek-config", mountPath: "/etc/threek", readOnly: true}] +
+                    (variables.clientTLS ? [Object.spec.initContainers.volumeMounts{name: "tls-client", mountPath: "/etc/etcd/tls/client", readOnly: true}] : []) +
+                    (variables.peerTLS ? [Object.spec.initContainers.volumeMounts{name: "tls-peer", mountPath: "/etc/etcd/tls/peer", readOnly: true}] : []),
+                  resources: Object.spec.initContainers.resources{
+                    requests: {"cpu": "10m", "memory": "32Mi"},
+                    limits: {"memory": "128Mi"}
+                  },
+                  securityContext: Object.spec.initContainers.securityContext{
+                    allowPrivilegeEscalation: false,
+                    readOnlyRootFilesystem: true,
+                    runAsNonRoot: true,
+                    capabilities: Object.spec.initContainers.securityContext.capabilities{drop: ["ALL"]}
+                  }
+                }
+            },
+            JSONPatch{
+              op: "add",
+              path: "/spec/volumes/-",
+              value: Object.spec.volumes{
+                name: "threek-config",
+                configMap: Object.spec.volumes.configMap{name: variables.cluster + "-threek", optional: true}
+              }
+            }
+          ]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: threek-agent
+spec:
+  policyName: threek-agent
