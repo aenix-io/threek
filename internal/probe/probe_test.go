@@ -123,12 +123,6 @@ func TestUntrustedPeer(t *testing.T) {
 	}
 }
 
-func TestPeerAutoTLSIsNotSupported(t *testing.T) {
-	if _, err := New(etcdconf.Settings{PeerAutoTLS: true}, timeout); err == nil {
-		t.Error("New() error = nil, want an error for peer auto TLS")
-	}
-}
-
 func TestRealEtcdPeer(t *testing.T) {
 	cl := etcdtest.Start(t, 3)
 	p, err := New(cl.Members[0].Settings, time.Second)

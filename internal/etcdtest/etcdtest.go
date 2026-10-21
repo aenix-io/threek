@@ -73,14 +73,13 @@ func Start(t *testing.T, n int) *Cluster {
 		}
 		cert, key := ca.Issue(t, dir, m.Name)
 		m.Settings = etcdconf.Settings{
-			CertFile:            cert,
-			KeyFile:             key,
-			TrustedCAFile:       ca.CertFile,
-			ListenClientURLs:    []string{m.ClientURL},
-			AdvertiseClientURLs: []string{m.ClientURL},
-			PeerCertFile:        cert,
-			PeerKeyFile:         key,
-			PeerTrustedCAFile:   ca.CertFile,
+			CertFile:          cert,
+			KeyFile:           key,
+			TrustedCAFile:     ca.CertFile,
+			Endpoint:          m.ClientURL,
+			PeerCertFile:      cert,
+			PeerKeyFile:       key,
+			PeerTrustedCAFile: ca.CertFile,
 		}
 		cl.Members = append(cl.Members, m)
 		initial = append(initial, m.Name+"="+m.PeerURL)

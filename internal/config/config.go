@@ -1,5 +1,5 @@
-// Package config reads threek settings from etcd's command line and
-// environment, or from a mounted ConfigMap.
+// Package config holds threek settings and reads the shared ones from a
+// mounted ConfigMap.
 package config
 
 import (
@@ -9,13 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/aenix-io/threek/internal/flagscan"
-)
-
-const (
-	flagPrefix = "threek-"
-	envPrefix  = "THREEK_"
 )
 
 type Mode string
@@ -124,64 +117,6 @@ func lookup(name string) (setting, bool) {
 		}
 	}
 	return setting{}, false
-}
-
-func envName(name string) string {
-	return envPrefix + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
-}
-
-// Parse reads threek settings from etcd's command line and environment.
-// Flags win over environment variables. It returns the command line and
-// environment to start etcd with: etcd rejects unknown flags, so every
-// --threek-* flag and THREEK_* variable is removed.
-func Parse(args, environ []string) (cfg Config, etcdArgs, etcdEnv []string, err error) {
-	cfg = Default()
-
-	byEnv := make(map[string]setting, len(settings))
-	for _, s := range settings {
-		byEnv[envName(s.name)] = s
-	}
-	for _, kv := range environ {
-		key, value, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(key, envPrefix) {
-			etcdEnv = append(etcdEnv, kv)
-			continue
-		}
-		s, ok := byEnv[key]
-		if !ok {
-			return Config{}, nil, nil, fmt.Errorf("unknown environment variable %q", key)
-		}
-		if err := s.set(&cfg, value); err != nil {
-			return Config{}, nil, nil, fmt.Errorf("%s: %w", key, err)
-		}
-	}
-
-	ours := func(name string) bool { return strings.HasPrefix(name, flagPrefix) }
-	next := 0
-	for _, f := range flagscan.Scan(args, ours) {
-		if !ours(f.Name) {
-			continue
-		}
-		flag := "--" + f.Name
-		s, ok := lookup(strings.TrimPrefix(f.Name, flagPrefix))
-		if !ok {
-			return Config{}, nil, nil, fmt.Errorf("unknown flag %q", flag)
-		}
-		if !f.HasValue {
-			return Config{}, nil, nil, fmt.Errorf("flag %q needs a value", flag)
-		}
-		if err := s.set(&cfg, f.Value); err != nil {
-			return Config{}, nil, nil, fmt.Errorf("%s: %w", flag, err)
-		}
-		etcdArgs = append(etcdArgs, args[next:f.Start]...)
-		next = f.End
-	}
-	etcdArgs = append(etcdArgs, args[next:]...)
-
-	if cfg.PreferredLeader != "" && cfg.Identity == "" {
-		return Config{}, nil, nil, errors.New("--threek-preferred-leader requires --threek-identity")
-	}
-	return cfg, etcdArgs, etcdEnv, nil
 }
 
 // FromDir reads the settings shared by every member of a cluster from a

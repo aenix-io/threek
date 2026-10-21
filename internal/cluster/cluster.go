@@ -73,16 +73,14 @@ type Client struct {
 }
 
 func New(s etcdconf.Settings) (*Client, error) {
-	localURL, err := s.LocalClientURL()
-	if err != nil {
-		return nil, err
-	}
+	localURL := s.Endpoint
 	var tlsConfig *tls.Config
 	if strings.HasPrefix(localURL, "https://") {
 		if s.TrustedCAFile == "" {
 			return nil, errors.New("etcd serves TLS but has no trusted CA file to verify it with")
 		}
 		info := transport.TLSInfo{CertFile: s.CertFile, KeyFile: s.KeyFile, TrustedCAFile: s.TrustedCAFile}
+		var err error
 		if tlsConfig, err = info.ClientConfig(); err != nil {
 			return nil, fmt.Errorf("client TLS: %w", err)
 		}

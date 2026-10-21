@@ -5,7 +5,6 @@ package probe
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -28,9 +27,6 @@ type Prober struct {
 // New returns a prober that authenticates with the member's peer certificate
 // and gives up on a peer after timeout.
 func New(s etcdconf.Settings, timeout time.Duration) (*Prober, error) {
-	if s.PeerAutoTLS {
-		return nil, errors.New("etcd uses peer auto TLS, which threek does not support")
-	}
 	var tlsConfig *tls.Config
 	if s.PeerTrustedCAFile != "" {
 		info := transport.TLSInfo{CertFile: s.PeerCertFile, KeyFile: s.PeerKeyFile, TrustedCAFile: s.PeerTrustedCAFile}

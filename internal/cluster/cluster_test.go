@@ -28,7 +28,7 @@ func timeout(t *testing.T) context.Context {
 }
 
 func TestNewRequiresCAForHTTPS(t *testing.T) {
-	_, err := New(etcdconf.Settings{ListenClientURLs: []string{"https://127.0.0.1:2379"}})
+	_, err := New(etcdconf.Settings{Endpoint: "https://127.0.0.1:2379"})
 	if err == nil {
 		t.Fatal("New() error = nil, want an error about the missing CA")
 	}

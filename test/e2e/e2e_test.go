@@ -1,10 +1,13 @@
 //go:build e2e
 
-// Package e2e runs three-member clusters of the threek image in containers
-// and breaks the network between them. E2E_IMAGE names the image under test.
+// Package e2e runs three-member etcd clusters in containers, each member with
+// a threek-agent container in its network namespace, and breaks the network
+// between them. E2E_IMAGE names the agent image under test and ETCD_IMAGE the
+// upstream etcd image.
 //
-// Containers run the way Talos runs etcd: an explicit command line, a
-// non-root user, no capabilities, client and peer mTLS.
+// The agent runs the way a static Pod with host networking runs it on Talos:
+// in the member's network namespace, as a non-root user without
+// capabilities, with client and peer mTLS.
 package e2e
 
 import (
@@ -31,12 +34,12 @@ const (
 	pki          = "/etc/etcd/pki"
 )
 
-var image string
+var image, etcdImage string
 
 func TestMain(m *testing.M) {
-	image = os.Getenv("E2E_IMAGE")
-	if image == "" {
-		fmt.Println("E2E_IMAGE is not set, skipping end-to-end tests")
+	image, etcdImage = os.Getenv("E2E_IMAGE"), os.Getenv("ETCD_IMAGE")
+	if image == "" || etcdImage == "" {
+		fmt.Println("E2E_IMAGE or ETCD_IMAGE is not set, skipping end-to-end tests")
 		os.Exit(0)
 	}
 	build := exec.Command("docker", "build", "--quiet", "--tag", nettools, "-")
@@ -72,6 +75,7 @@ type member struct {
 	name      string
 	ip        string
 	container string
+	agent     string
 	id        uint64
 }
 
@@ -91,8 +95,9 @@ func (c *cluster) member(name string) *member {
 	return nil
 }
 
-// start runs members a, b and c with extra threek flags and waits for a leader.
-func start(t *testing.T, threekFlags ...string) *cluster {
+// start runs members a, b and c with their agents, which get extra flags, and
+// waits for a leader.
+func start(t *testing.T, agentFlags ...string) *cluster {
 	t.Helper()
 	suffix := make([]byte, 3)
 	_, _ = rand.Read(suffix)
@@ -106,7 +111,7 @@ func start(t *testing.T, threekFlags ...string) *cluster {
 	c := &cluster{t: t, pkiDir: dir}
 	var initial []string
 	for i, name := range []string{"a", "b", "c"} {
-		m := &member{name: name, ip: fmt.Sprintf("172.31.250.%d", 11+i), container: prefix + "-" + name}
+		m := &member{name: name, ip: fmt.Sprintf("172.31.250.%d", 11+i), container: prefix + "-" + name, agent: prefix + "-" + name + "-agent"}
 		ca.Issue(t, dir, name, net.ParseIP(m.ip))
 		c.members = append(c.members, m)
 		initial = append(initial, fmt.Sprintf("%s=https://%s:2380", name, m.ip))
@@ -118,7 +123,7 @@ func start(t *testing.T, threekFlags ...string) *cluster {
 			"--user", "60:60", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 			"--read-only", "--tmpfs", "/var/lib/etcd:uid=60,gid=60,mode=0700",
 			"--volume", dir + ":" + pki + ":ro",
-			image, "/usr/local/bin/etcd",
+			etcdImage, "/usr/local/bin/etcd",
 			"--name=" + m.name,
 			"--data-dir=/var/lib/etcd",
 			"--listen-client-urls=https://0.0.0.0:2379",
@@ -136,15 +141,32 @@ func start(t *testing.T, threekFlags ...string) *cluster {
 			"--peer-cert-file=" + pki + "/" + m.name + ".crt",
 			"--peer-key-file=" + pki + "/" + m.name + ".key",
 			"--peer-trusted-ca-file=" + pki + "/ca.crt",
-			"--threek-identity=zone-" + m.name,
 		}
-		mustDocker(t, append(args, threekFlags...)...)
+		mustDocker(t, args...)
+		t.Cleanup(func() { _, _ = docker("rm", "--force", m.container) })
+
+		agent := []string{
+			"run", "--detach", "--name", m.agent,
+			"--network", "container:" + m.container,
+			"--user", "60:60", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
+			"--volume", dir + ":" + pki + ":ro",
+			image,
+			"--endpoint=https://127.0.0.1:2379",
+			"--cert-file=" + pki + "/" + m.name + ".crt",
+			"--key-file=" + pki + "/" + m.name + ".key",
+			"--trusted-ca-file=" + pki + "/ca.crt",
+			"--peer-cert-file=" + pki + "/" + m.name + ".crt",
+			"--peer-key-file=" + pki + "/" + m.name + ".key",
+			"--peer-trusted-ca-file=" + pki + "/ca.crt",
+			"--identity=zone-" + m.name,
+		}
+		mustDocker(t, append(agent, agentFlags...)...)
 		t.Cleanup(func() {
 			if t.Failed() {
-				logs, _ := exec.Command("docker", "logs", "--tail", "60", m.container).CombinedOutput()
-				t.Logf("logs of %s:\n%s", m.name, logs)
+				logs, _ := exec.Command("docker", "logs", "--tail", "60", m.agent).CombinedOutput()
+				t.Logf("agent logs of %s:\n%s", m.name, logs)
 			}
-			_, _ = docker("rm", "--force", m.container)
+			_, _ = docker("rm", "--force", m.agent)
 		})
 	}
 
@@ -320,7 +342,7 @@ func always(t *testing.T, period time.Duration, what string, cond func() (bool, 
 }
 
 func TestPartialPartitionMovesLeaderToMemberThatSeesEveryone(t *testing.T) {
-	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s", "--threek-metrics-listen=127.0.0.1:2390")
+	c := start(t, "--mode=enforce", "--move-cooldown=10s", "--metrics-listen=127.0.0.1:2390")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 	c.moveLeaderTo(a)
 
@@ -341,7 +363,7 @@ func TestPartialPartitionMovesLeaderToMemberThatSeesEveryone(t *testing.T) {
 }
 
 func TestSiteFailureKeepsLeader(t *testing.T) {
-	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s")
+	c := start(t, "--mode=enforce", "--move-cooldown=10s")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 	c.moveLeaderTo(a)
 
@@ -353,7 +375,7 @@ func TestSiteFailureKeepsLeader(t *testing.T) {
 }
 
 func TestDryRunLeavesTheProblemInPlace(t *testing.T) {
-	c := start(t, "--threek-mode=dry-run", "--threek-move-cooldown=10s")
+	c := start(t, "--mode=dry-run", "--move-cooldown=10s")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 	c.moveLeaderTo(a)
 
@@ -365,7 +387,7 @@ func TestDryRunLeavesTheProblemInPlace(t *testing.T) {
 		seenByC, seenByB := c.leaderSeenBy(w), c.leaderSeenBy(b)
 		return seenByC == a.id && seenByB == 0, fmt.Sprintf("(c sees %x, b sees %x)", seenByC, seenByB)
 	})
-	logs, err := exec.Command("docker", "logs", a.container).CombinedOutput()
+	logs, err := exec.Command("docker", "logs", a.agent).CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,18 +396,9 @@ func TestDryRunLeavesTheProblemInPlace(t *testing.T) {
 	}
 }
 
-func TestStopEndsLikeUpstreamEtcd(t *testing.T) {
-	c := start(t, "--threek-mode=enforce")
-	a := c.member("a")
-	mustDocker(t, "stop", a.container)
-	if code := mustDocker(t, "inspect", "--format", "{{.State.ExitCode}}", a.container); code != "0" {
-		t.Errorf("exit code = %s, want 0 as upstream etcd exits as PID 1", code)
-	}
-}
-
 func TestPreferredLeaderYieldsToPartitionAndReturns(t *testing.T) {
-	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s",
-		"--threek-preferred-leader=zone-c", "--threek-prefer-after=10s")
+	c := start(t, "--mode=enforce", "--move-cooldown=10s",
+		"--preferred-leader=zone-c", "--prefer-after=10s")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 
 	eventually(t, 90*time.Second, "leader settles on the preferred member c", func() (bool, string) {
@@ -406,7 +419,7 @@ func TestPreferredLeaderYieldsToPartitionAndReturns(t *testing.T) {
 }
 
 func TestFlappingLinkKeepsLeader(t *testing.T) {
-	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s")
+	c := start(t, "--mode=enforce", "--move-cooldown=10s")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 	c.moveLeaderTo(a)
 
@@ -416,7 +429,7 @@ func TestFlappingLinkKeepsLeader(t *testing.T) {
 	})
 
 	// The flaps must have been seen, or the test proves nothing.
-	logs, err := exec.Command("docker", "logs", a.container).CombinedOutput()
+	logs, err := exec.Command("docker", "logs", a.agent).CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +439,7 @@ func TestFlappingLinkKeepsLeader(t *testing.T) {
 }
 
 func TestFollowerPartitionKeepsLeader(t *testing.T) {
-	c := start(t, "--threek-mode=enforce", "--threek-move-cooldown=10s")
+	c := start(t, "--mode=enforce", "--move-cooldown=10s")
 	a, b, w := c.member("a"), c.member("b"), c.member("c")
 	c.moveLeaderTo(a)
 

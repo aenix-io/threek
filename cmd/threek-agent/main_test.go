@@ -35,7 +35,7 @@ func TestParseOptions(t *testing.T) {
 		CertFile:          "/tls/client/tls.crt",
 		KeyFile:           "/tls/client/tls.key",
 		TrustedCAFile:     "/tls/client/ca.crt",
-		ListenClientURLs:  []string{"https://127.0.0.1:2379"},
+		Endpoint:          "https://127.0.0.1:2379",
 		PeerCertFile:      "/tls/peer/tls.crt",
 		PeerKeyFile:       "/tls/peer/tls.key",
 		PeerTrustedCAFile: "/tls/peer/ca.crt",
@@ -53,7 +53,7 @@ func TestParseOptionsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
-	if got := opts.settings.ListenClientURLs; len(got) != 1 || got[0] != "https://127.0.0.1:2379" {
+	if got := opts.settings.Endpoint; got != "https://127.0.0.1:2379" {
 		t.Errorf("endpoint = %q, want https://127.0.0.1:2379", got)
 	}
 	if opts.configDir != "" {

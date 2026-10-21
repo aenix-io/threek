@@ -74,7 +74,7 @@ func parseOptions(args []string, getenv func(string) string) (options, error) {
 	case opts.shared.PreferredLeader != "" && opts.identity == "":
 		return options{}, errors.New("--preferred-leader requires --identity")
 	}
-	opts.settings.ListenClientURLs = []string{*endpoint}
+	opts.settings.Endpoint = *endpoint
 	return opts, nil
 }
 
