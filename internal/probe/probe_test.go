@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,11 @@ const timeout = 300 * time.Millisecond
 // peer starts a TLS server that requires a client certificate from ca, like
 // etcd's peer listener, and returns its URL.
 func peer(t *testing.T, ca *etcdtest.CA, dir string, handler http.HandlerFunc) string {
+	t.Helper()
+	return peerServer(t, ca, dir, handler, nil).URL
+}
+
+func peerServer(t *testing.T, ca *etcdtest.CA, dir string, handler http.HandlerFunc, connState func(net.Conn, http.ConnState)) *httptest.Server {
 	t.Helper()
 	certFile, keyFile := ca.Issue(t, dir, "server")
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -34,9 +41,10 @@ func peer(t *testing.T, ca *etcdtest.CA, dir string, handler http.HandlerFunc) s
 	pool.AppendCertsFromPEM(pem)
 	srv := httptest.NewUnstartedServer(handler)
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, ClientCAs: pool, ClientAuth: tls.RequireAndVerifyClientCert}
+	srv.Config.ConnState = connState
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv
 }
 
 func newProber(t *testing.T) (*Prober, *etcdtest.CA, string) {
@@ -137,6 +145,31 @@ func TestRealEtcdPeer(t *testing.T) {
 	}
 }
 
+func TestRealEtcdPeerKeepsTheConnection(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	p, err := New(cl.Members[0].Settings, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	var reused atomic.Int32
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Reused {
+				reused.Add(1)
+			}
+		},
+	})
+	for range 5 {
+		if !p.Reachable(ctx, []string{cl.Members[1].PeerURL}) {
+			t.Fatal("Reachable() = false, want true")
+		}
+	}
+	if n := reused.Load(); n != 4 {
+		t.Errorf("%d of 5 probes reused the connection, want 4", n)
+	}
+}
+
 func TestVerifiesTLS(t *testing.T) {
 	plain, err := New(etcdconf.Settings{}, timeout)
 	if err != nil {
@@ -154,5 +187,25 @@ func TestVerifiesTLS(t *testing.T) {
 	}
 	if !p.VerifiesTLS() {
 		t.Error("VerifiesTLS() = false with a peer CA")
+	}
+}
+
+// Every new connection costs a TLS handshake, and probes run every second
+// against every peer: they must reuse one connection per peer.
+func TestProbesReuseTheConnection(t *testing.T) {
+	p, ca, dir := newProber(t)
+	var conns atomic.Int32
+	srv := peerServer(t, ca, dir, probing(t), func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	})
+	for range 5 {
+		if !p.Reachable(context.Background(), []string{srv.URL}) {
+			t.Fatal("Reachable() = false, want true")
+		}
+	}
+	if n := conns.Load(); n != 1 {
+		t.Errorf("5 probes opened %d connections, want 1", n)
 	}
 }

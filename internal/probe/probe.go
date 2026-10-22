@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +19,10 @@ import (
 // path is etcd's rafthttp.ProbingPrefix. A bare TCP connect would not do:
 // etcd logs every peer connection that closes before the TLS handshake.
 const path = "/raft/probing"
+
+// maxBody bounds how much of a probe response is read; etcd answers with a
+// few dozen bytes.
+const maxBody = 64 << 10
 
 type Prober struct {
 	client      *http.Client
@@ -75,5 +80,8 @@ func (p *Prober) probe(ctx context.Context, url string) bool {
 		return false
 	}
 	defer resp.Body.Close()
+	// An unread body keeps the connection from being reused, and a new
+	// connection every probe costs a TLS handshake.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
 	return resp.StatusCode == http.StatusOK
 }
