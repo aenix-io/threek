@@ -2,8 +2,6 @@
 
 An agent next to every etcd member that keeps the Raft leader on a member every other member can reach.
 
-> **Status:** early development, not released yet. The agent, the etcd-operator sidecar and the Talos static Pod are implemented. The agent is tested end to end against blackhole partitions next to upstream etcd and inside etcd-operator clusters; the Talos static Pod is not tested on Talos yet. See [docs/design.md](docs/design.md).
-
 ## The problem
 
 Take a three-member etcd cluster across three sites, A, B and C.

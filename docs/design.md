@@ -1,7 +1,5 @@
 # threek design
 
-Status: draft. Everything below is implemented. Nothing is released yet.
-
 ## Problem
 
 A three-member etcd cluster is spread across three sites: A, B and C, one member per site.
