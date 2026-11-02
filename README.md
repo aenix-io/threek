@@ -156,7 +156,7 @@ cosign verify ghcr.io/aenix-io/threek-agent:<threek version> \
 ## Development
 
 ```bash
-make test   # unit and integration tests; set TEST_ETCD_BINARY to an etcd binary to run the tests against real clusters
+make test   # unit and integration tests; the integration tests run against the etcd in PATH or TEST_ETCD_BINARY and are skipped without one
 make lint   # golangci-lint
 make build  # bin/threek-agent
 make image IMAGE=threek-agent:dev
