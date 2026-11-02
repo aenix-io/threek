@@ -119,7 +119,7 @@ Talos keeps running etcd from its own image and upgrades it as usual.
   ```
 
 - Every setting is a flag of the agent, such as `--mode=enforce`. Changing one restarts the agent, not etcd.
-- The agent uses the etcd client certificate Talos issues to kube-apiserver and picks up a renewed certificate on its next connection. After rotating the etcd CA, restart the agent.
+- The agent uses the etcd client certificate Talos issues to kube-apiserver and picks up a renewed certificate or a rotated etcd CA on its next poll, without a restart.
 
 ## Configuration
 
