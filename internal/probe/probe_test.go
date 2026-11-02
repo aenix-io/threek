@@ -122,6 +122,34 @@ func TestAnyURLIsEnough(t *testing.T) {
 	}
 }
 
+// A peer restarted after a CA rotation trusts only the new CA and presents
+// a certificate of it; the agent must follow the rotated files without a
+// restart.
+func TestRotatedFilesTakeEffect(t *testing.T) {
+	dir := t.TempDir()
+	ca := etcdtest.NewCA(t, dir)
+	certFile, keyFile := ca.Issue(t, dir, "client")
+	p, err := New(etcdconf.Settings{PeerCertFile: certFile, PeerKeyFile: keyFile, PeerTrustedCAFile: ca.CertFile}, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+
+	newDir := t.TempDir()
+	newCA := etcdtest.NewCA(t, newDir)
+	url := peer(t, newCA, newDir, probing(t))
+	if p.Reachable(context.Background(), []string{url}) {
+		t.Fatal("Reachable() = true before the rotation")
+	}
+	newCert, newKey := newCA.Issue(t, newDir, "client")
+	etcdtest.Replace(t, certFile, newCert)
+	etcdtest.Replace(t, keyFile, newKey)
+	etcdtest.Replace(t, ca.CertFile, newCA.CertFile)
+	if !p.Reachable(context.Background(), []string{url}) {
+		t.Error("Reachable() = false after the rotation")
+	}
+}
+
 func TestUntrustedPeer(t *testing.T) {
 	p, _, _ := newProber(t)
 	otherDir := t.TempDir()

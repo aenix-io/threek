@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -71,6 +72,36 @@ func TestStatusAndMembers(t *testing.T) {
 		if remote.MemberID != m.ID || remote.ClusterID != local.ClusterID {
 			t.Errorf("remote status = %+v, want member %x of cluster %x", remote, m.ID, local.ClusterID)
 		}
+	}
+}
+
+// The client must follow its certificate files when they are rotated in
+// place: here they start out issued by a CA the cluster does not trust.
+func TestRotatedFilesTakeEffect(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	m := cl.Members[0]
+	dir := t.TempDir()
+	other := etcdtest.NewCA(t, dir)
+	certFile, keyFile := other.Issue(t, dir, "agent")
+	caFile := filepath.Join(dir, "trusted-ca.crt")
+	etcdtest.Replace(t, caFile, other.CertFile)
+	c, err := New(etcdconf.Settings{Endpoint: m.ClientURL, CertFile: certFile, KeyFile: keyFile, TrustedCAFile: caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	short, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := c.Status(short, m.ClientURL); err == nil {
+		t.Fatal("Status() error = nil with certificates of another CA")
+	}
+	etcdtest.Replace(t, certFile, m.Settings.CertFile)
+	etcdtest.Replace(t, keyFile, m.Settings.KeyFile)
+	etcdtest.Replace(t, caFile, m.Settings.TrustedCAFile)
+	if _, err := c.Status(ctx, m.ClientURL); err != nil {
+		t.Errorf("Status() after the rotation error = %v", err)
 	}
 }
 

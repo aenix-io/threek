@@ -14,11 +14,11 @@ import (
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
 	"github.com/aenix-io/threek/internal/etcdconf"
+	"github.com/aenix-io/threek/internal/tlsfiles"
 )
 
 const (
@@ -66,30 +66,26 @@ type Record struct {
 // member's own certificate.
 type Client struct {
 	localURL string
-	tls      *tls.Config
+	files    *tlsfiles.Source
 
 	mu      sync.Mutex
+	tls     *tls.Config
 	clients map[string]*clientv3.Client
 }
 
 func New(s etcdconf.Settings) (*Client, error) {
-	localURL := s.Endpoint
-	var tlsConfig *tls.Config
-	if strings.HasPrefix(localURL, "https://") {
+	c := &Client{localURL: s.Endpoint, clients: map[string]*clientv3.Client{}}
+	if strings.HasPrefix(c.localURL, "https://") {
 		if s.TrustedCAFile == "" {
 			return nil, errors.New("etcd serves TLS but has no trusted CA file to verify it with")
 		}
-		info := transport.TLSInfo{CertFile: s.CertFile, KeyFile: s.KeyFile, TrustedCAFile: s.TrustedCAFile}
 		var err error
-		if tlsConfig, err = info.ClientConfig(); err != nil {
+		if c.files, err = tlsfiles.New(s.CertFile, s.KeyFile, s.TrustedCAFile); err != nil {
 			return nil, fmt.Errorf("client TLS: %w", err)
 		}
+		c.tls, _, _ = c.files.Config()
 	}
-	return &Client{
-		localURL: localURL,
-		tls:      tlsConfig,
-		clients:  map[string]*clientv3.Client{},
-	}, nil
+	return c, nil
 }
 
 func (c *Client) LocalURL() string {
@@ -99,6 +95,10 @@ func (c *Client) LocalURL() string {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.closeClients()
+}
+
+func (c *Client) closeClients() error {
 	var errs []error
 	for _, cli := range c.clients {
 		errs = append(errs, cli.Close())
@@ -108,10 +108,22 @@ func (c *Client) Close() error {
 }
 
 // client returns the connection to the member at url. Connections are kept:
-// clientv3's Maintenance.Status dials a new one on every call.
+// clientv3's Maintenance.Status dials a new one on every call. When the
+// certificate files change, every connection is made again with the new
+// files.
 func (c *Client) client(url string) (*clientv3.Client, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.files != nil {
+		cfg, changed, err := c.files.Config()
+		if err != nil {
+			return nil, fmt.Errorf("client TLS: %w", err)
+		}
+		if changed {
+			_ = c.closeClients()
+			c.tls = cfg
+		}
+	}
 	if cli, ok := c.clients[url]; ok {
 		return cli, nil
 	}

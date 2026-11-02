@@ -24,23 +24,11 @@ func issue(t *testing.T) files {
 	return files{cert: cert, key: key, ca: ca.CertFile}
 }
 
-// rotate replaces dst's files with src's the way kubelet updates a mounted
-// Secret: the new content appears at once.
 func rotate(t *testing.T, dst, src files) {
 	t.Helper()
-	for _, p := range [][2]string{{src.cert, dst.cert}, {src.key, dst.key}, {src.ca, dst.ca}} {
-		content, err := os.ReadFile(p[0])
-		if err != nil {
-			t.Fatal(err)
-		}
-		tmp := filepath.Join(filepath.Dir(p[1]), ".tmp")
-		if err := os.WriteFile(tmp, content, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(tmp, p[1]); err != nil {
-			t.Fatal(err)
-		}
-	}
+	etcdtest.Replace(t, dst.cert, src.cert)
+	etcdtest.Replace(t, dst.key, src.key)
+	etcdtest.Replace(t, dst.ca, src.ca)
 }
 
 // server starts a TLS server that presents a certificate from f and

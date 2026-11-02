@@ -9,11 +9,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-
 	"github.com/aenix-io/threek/internal/etcdconf"
+	"github.com/aenix-io/threek/internal/tlsfiles"
 )
 
 // path is etcd's rafthttp.ProbingPrefix. A bare TCP connect would not do:
@@ -25,37 +25,65 @@ const path = "/raft/probing"
 const maxBody = 64 << 10
 
 type Prober struct {
-	client      *http.Client
-	timeout     time.Duration
-	verifiesTLS bool
+	files   *tlsfiles.Source
+	timeout time.Duration
+
+	mu      sync.Mutex
+	client  *http.Client
+	retired *http.Client
 }
 
 // New returns a prober that authenticates with the member's peer certificate
 // and gives up on a peer after timeout.
 func New(s etcdconf.Settings, timeout time.Duration) (*Prober, error) {
+	p := &Prober{timeout: timeout}
 	var tlsConfig *tls.Config
 	if s.PeerTrustedCAFile != "" {
-		info := transport.TLSInfo{CertFile: s.PeerCertFile, KeyFile: s.PeerKeyFile, TrustedCAFile: s.PeerTrustedCAFile}
 		var err error
-		if tlsConfig, err = info.ClientConfig(); err != nil {
+		if p.files, err = tlsfiles.New(s.PeerCertFile, s.PeerKeyFile, s.PeerTrustedCAFile); err != nil {
 			return nil, fmt.Errorf("peer TLS: %w", err)
 		}
+		tlsConfig, _, _ = p.files.Config()
 	}
-	return &Prober{
-		client:      &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}},
-		timeout:     timeout,
-		verifiesTLS: tlsConfig != nil,
-	}, nil
+	p.client = newHTTPClient(tlsConfig)
+	return p, nil
+}
+
+func newHTTPClient(tlsConfig *tls.Config) *http.Client {
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
 }
 
 // VerifiesTLS reports whether a peer CA was given, without which no peer
 // serving TLS can be verified.
 func (p *Prober) VerifiesTLS() bool {
-	return p.verifiesTLS
+	return p.files != nil
 }
 
 func (p *Prober) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.client.CloseIdleConnections()
+}
+
+// httpClient returns the client for the peer files as they are now. When
+// they change, connections made with the old files are dropped; when they
+// are broken, the previous client stays.
+func (p *Prober) httpClient() *http.Client {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.files == nil {
+		return p.client
+	}
+	if cfg, changed, _ := p.files.Config(); changed {
+		p.retired = p.client
+		p.client = newHTTPClient(cfg)
+	}
+	// Probes in flight when the files changed return their connections to
+	// the retired client afterwards.
+	if p.retired != nil {
+		p.retired.CloseIdleConnections()
+	}
+	return p.client
 }
 
 // Reachable reports whether any of a member's peer URLs answers in time.
@@ -75,7 +103,7 @@ func (p *Prober) probe(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := p.client.Do(req)
+	resp, err := p.httpClient().Do(req)
 	if err != nil {
 		return false
 	}
