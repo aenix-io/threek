@@ -69,7 +69,6 @@ type Client struct {
 	files    *tlsfiles.Source
 
 	mu      sync.Mutex
-	tls     *tls.Config
 	clients map[string]*clientv3.Client
 }
 
@@ -83,9 +82,34 @@ func New(s etcdconf.Settings) (*Client, error) {
 		if c.files, err = tlsfiles.New(s.CertFile, s.KeyFile, s.TrustedCAFile); err != nil {
 			return nil, fmt.Errorf("client TLS: %w", err)
 		}
-		c.tls, _, _ = c.files.Config()
 	}
 	return c, nil
+}
+
+// ReloadTLS reads the certificate files again. When they changed, every
+// connection is made again with the new files; calls in flight on the old
+// connections fail. When they are broken, the previous files stay in use.
+func (c *Client) ReloadTLS() (changed bool, err error) {
+	if c.files == nil {
+		return false, nil
+	}
+	changed, err = c.files.Reload()
+	if err != nil {
+		return false, fmt.Errorf("client TLS: %w", err)
+	}
+	if changed {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		_ = c.closeClients()
+	}
+	return changed, nil
+}
+
+func (c *Client) tlsConfig() *tls.Config {
+	if c.files == nil {
+		return nil
+	}
+	return c.files.Config()
 }
 
 func (c *Client) LocalURL() string {
@@ -108,28 +132,16 @@ func (c *Client) closeClients() error {
 }
 
 // client returns the connection to the member at url. Connections are kept:
-// clientv3's Maintenance.Status dials a new one on every call. When the
-// certificate files change, every connection is made again with the new
-// files.
+// clientv3's Maintenance.Status dials a new one on every call.
 func (c *Client) client(url string) (*clientv3.Client, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.files != nil {
-		cfg, changed, err := c.files.Config()
-		if err != nil {
-			return nil, fmt.Errorf("client TLS: %w", err)
-		}
-		if changed {
-			_ = c.closeClients()
-			c.tls = cfg
-		}
-	}
 	if cli, ok := c.clients[url]; ok {
 		return cli, nil
 	}
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   []string{url},
-		TLS:         c.tls,
+		TLS:         c.tlsConfig(),
 		DialTimeout: dialTimeout,
 		Logger:      zap.NewNop(),
 	})

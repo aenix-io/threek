@@ -33,34 +33,42 @@ func New(certFile, keyFile, caFile string) (*Source, error) {
 	s := &Source{
 		info: transport.TLSInfo{CertFile: certFile, KeyFile: keyFile, TrustedCAFile: caFile},
 	}
-	if _, _, err := s.Config(); err != nil {
+	if _, err := s.Reload(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-// Config returns the config for the files as they are now. changed reports
-// that it replaces the config of the previous call: connections made with
-// that one keep presenting the old certificate and trusting the old CA.
-// When the files cannot be read or do not make a valid config, Config
-// returns the previous config along with the error.
-func (s *Source) Config() (cfg *tls.Config, changed bool, err error) {
+// Config returns the config of the files as last loaded.
+func (s *Source) Config() *tls.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.config
+}
+
+// Reload reads the files again and reports whether the config changed.
+// Connections made with the previous config keep presenting the old
+// certificate and trusting the old CA. When the files cannot be read or do
+// not make a valid config, the previous config stays.
+func (s *Source) Reload() (changed bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	content, err := s.read()
 	if err != nil {
-		return s.config, false, fmt.Errorf("TLS files: %w", err)
+		return false, err
 	}
 	if s.config != nil && bytes.Equal(content, s.content) {
-		return s.config, false, nil
+		return false, nil
 	}
-	cfg, err = s.info.ClientConfig()
+	// ClientConfig reads the files once more; a change in between only makes
+	// the next Reload rebuild the config again.
+	cfg, err := s.info.ClientConfig()
 	if err != nil {
-		return s.config, false, fmt.Errorf("TLS files: %w", err)
+		return false, err
 	}
 	changed = s.config != nil
 	s.config, s.content = cfg, content
-	return cfg, changed, nil
+	return changed, nil
 }
 
 // read returns the content of every file. It rejects a CA file without

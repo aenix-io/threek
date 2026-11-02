@@ -3,8 +3,10 @@ package cluster
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,8 +102,92 @@ func TestRotatedFilesTakeEffect(t *testing.T) {
 	etcdtest.Replace(t, certFile, m.Settings.CertFile)
 	etcdtest.Replace(t, keyFile, m.Settings.KeyFile)
 	etcdtest.Replace(t, caFile, m.Settings.TrustedCAFile)
+	if changed, err := c.ReloadTLS(); !changed || err != nil {
+		t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+	}
 	if _, err := c.Status(ctx, m.ClientURL); err != nil {
 		t.Errorf("Status() after the rotation error = %v", err)
+	}
+}
+
+// ownFiles copies m's files, so a test can break them without breaking etcd.
+func ownFiles(t *testing.T, m *etcdtest.Member) etcdconf.Settings {
+	t.Helper()
+	dir := t.TempDir()
+	s := etcdconf.Settings{
+		Endpoint:      m.ClientURL,
+		CertFile:      filepath.Join(dir, "tls.crt"),
+		KeyFile:       filepath.Join(dir, "tls.key"),
+		TrustedCAFile: filepath.Join(dir, "ca.crt"),
+	}
+	etcdtest.Replace(t, s.CertFile, m.Settings.CertFile)
+	etcdtest.Replace(t, s.KeyFile, m.Settings.KeyFile)
+	etcdtest.Replace(t, s.TrustedCAFile, m.Settings.TrustedCAFile)
+	return s
+}
+
+func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	s := ownFiles(t, cl.Members[0])
+	c, err := New(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if _, err := c.Status(ctx, c.LocalURL()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.TrustedCAFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := c.ReloadTLS(); changed || err == nil {
+		t.Errorf("ReloadTLS() = %v, %v with an empty CA file; want an error and no change", changed, err)
+	}
+	for _, m := range cl.Members {
+		if _, err := c.Status(ctx, m.ClientURL); err != nil {
+			t.Errorf("Status(%s) with the previous config error = %v", m.Name, err)
+		}
+	}
+}
+
+// Rotated files take effect only on ReloadTLS, so status calls in flight
+// while the files change keep their connections.
+func TestStatusCallsDuringRotation(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	s := ownFiles(t, cl.Members[0])
+	c, err := New(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	errs := make(chan error, len(cl.Members))
+	var wg sync.WaitGroup
+	for _, m := range cl.Members {
+		wg.Go(func() {
+			for range 20 {
+				if _, err := c.Status(ctx, m.ClientURL); err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	other := cl.Members[1].Settings
+	etcdtest.Replace(t, s.CertFile, other.CertFile)
+	etcdtest.Replace(t, s.KeyFile, other.KeyFile)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Status() while the files changed error = %v", err)
+	}
+	if changed, err := c.ReloadTLS(); !changed || err != nil {
+		t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+	}
+	if _, err := c.Status(ctx, c.LocalURL()); err != nil {
+		t.Errorf("Status() after ReloadTLS error = %v", err)
 	}
 }
 

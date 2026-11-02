@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,9 +147,79 @@ func TestRotatedFilesTakeEffect(t *testing.T) {
 	etcdtest.Replace(t, certFile, newCert)
 	etcdtest.Replace(t, keyFile, newKey)
 	etcdtest.Replace(t, ca.CertFile, newCA.CertFile)
+	if changed, err := p.ReloadTLS(); !changed || err != nil {
+		t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+	}
 	if !p.Reachable(context.Background(), []string{url}) {
 		t.Error("Reachable() = false after the rotation")
 	}
+}
+
+func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
+	p, ca, dir := newProber(t)
+	url := peer(t, ca, dir, probing(t))
+	if err := os.WriteFile(ca.CertFile, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := p.ReloadTLS(); changed || err == nil {
+		t.Errorf("ReloadTLS() = %v, %v with a broken CA file; want an error and no change", changed, err)
+	}
+	// Without idle connections the probe makes a new one with the previous config.
+	p.Close()
+	if !p.Reachable(context.Background(), []string{url}) {
+		t.Error("Reachable() = false with the previous config")
+	}
+}
+
+// Connections made with old files are closed on reload, so they neither stay
+// open on the peer nor keep presenting an old certificate.
+func TestReloadClosesOldConnections(t *testing.T) {
+	p, ca, dir := newProber(t)
+	var mu sync.Mutex
+	open := map[net.Conn]bool{}
+	srv := peerServer(t, ca, dir, probing(t), func(c net.Conn, state http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch state {
+		case http.StateNew:
+			open[c] = true
+		case http.StateClosed, http.StateHijacked:
+			delete(open, c)
+		}
+	})
+	openConns := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			mu.Lock()
+			n := len(open)
+			mu.Unlock()
+			if n == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d connections open, want %d", n, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	for _, name := range []string{"renewed", "renewed-again"} {
+		if !p.Reachable(context.Background(), []string{srv.URL}) {
+			t.Fatal("Reachable() = false, want true")
+		}
+		cert, key := ca.Issue(t, t.TempDir(), name)
+		etcdtest.Replace(t, filepath.Join(dir, "client.crt"), cert)
+		etcdtest.Replace(t, filepath.Join(dir, "client.key"), key)
+		if changed, err := p.ReloadTLS(); !changed || err != nil {
+			t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+		}
+		openConns(0)
+	}
+	if !p.Reachable(context.Background(), []string{srv.URL}) {
+		t.Fatal("Reachable() = false, want true")
+	}
+	p.Close()
+	openConns(0)
 }
 
 func TestUntrustedPeer(t *testing.T) {

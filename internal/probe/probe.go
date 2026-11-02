@@ -28,9 +28,8 @@ type Prober struct {
 	files   *tlsfiles.Source
 	timeout time.Duration
 
-	mu      sync.Mutex
-	client  *http.Client
-	retired *http.Client
+	mu     sync.Mutex
+	client *http.Client
 }
 
 // New returns a prober that authenticates with the member's peer certificate
@@ -43,7 +42,7 @@ func New(s etcdconf.Settings, timeout time.Duration) (*Prober, error) {
 		if p.files, err = tlsfiles.New(s.PeerCertFile, s.PeerKeyFile, s.PeerTrustedCAFile); err != nil {
 			return nil, fmt.Errorf("peer TLS: %w", err)
 		}
-		tlsConfig, _, _ = p.files.Config()
+		tlsConfig = p.files.Config()
 	}
 	p.client = newHTTPClient(tlsConfig)
 	return p, nil
@@ -60,29 +59,34 @@ func (p *Prober) VerifiesTLS() bool {
 }
 
 func (p *Prober) Close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.client.CloseIdleConnections()
+	p.httpClient().CloseIdleConnections()
 }
 
-// httpClient returns the client for the peer files as they are now. When
-// they change, connections made with the old files are dropped; when they
-// are broken, the previous client stays.
+// ReloadTLS reads the peer certificate files again. When they changed, the
+// connections made with the old files are closed; call it while no probe is
+// in flight, or the connection of that probe stays open. When the files are
+// broken, the previous files stay in use.
+func (p *Prober) ReloadTLS() (changed bool, err error) {
+	if p.files == nil {
+		return false, nil
+	}
+	changed, err = p.files.Reload()
+	if err != nil {
+		return false, fmt.Errorf("peer TLS: %w", err)
+	}
+	if changed {
+		p.mu.Lock()
+		old := p.client
+		p.client = newHTTPClient(p.files.Config())
+		p.mu.Unlock()
+		old.CloseIdleConnections()
+	}
+	return changed, nil
+}
+
 func (p *Prober) httpClient() *http.Client {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.files == nil {
-		return p.client
-	}
-	if cfg, changed, _ := p.files.Config(); changed {
-		p.retired = p.client
-		p.client = newHTTPClient(cfg)
-	}
-	// Probes in flight when the files changed return their connections to
-	// the retired client afterwards.
-	if p.retired != nil {
-		p.retired.CloseIdleConnections()
-	}
 	return p.client
 }
 
