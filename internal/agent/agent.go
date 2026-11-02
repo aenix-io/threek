@@ -56,12 +56,14 @@ type Cluster interface {
 	PutRecord(ctx context.Context, id uint64, r cluster.Record, lease int64) error
 	RenewLease(ctx context.Context, lease int64) error
 	RevokeLease(ctx context.Context, lease int64) error
+	ReloadTLS() (changed bool, err error)
 }
 
 type Prober interface {
 	Reachable(ctx context.Context, peerURLs []string) bool
 	// VerifiesTLS reports whether the prober can verify peers that serve TLS.
 	VerifiesTLS() bool
+	ReloadTLS() (changed bool, err error)
 }
 
 // Run connects to the local member and runs the agent until ctx is done.
@@ -257,6 +259,10 @@ func (a *Agent) Tick(ctx context.Context) {
 		a.logChange("decision", slog.LevelInfo, "threek is off", "")
 		return
 	}
+	// Reloading closes the connections made with old files, so it runs
+	// before the poll makes any call.
+	a.reloadTLS("client", a.c.ReloadTLS)
+	a.reloadTLS("peer", a.prober.ReloadTLS)
 	pollCtx, cancel := context.WithTimeout(ctx, a.pollTimeout)
 	obs, err := a.observe(pollCtx)
 	cancel()
@@ -277,6 +283,19 @@ func (a *Agent) Tick(ctx context.Context) {
 		a.metrics.linkUp.WithLabelValues(hex(uint64(l.From)), hex(uint64(l.To))).Set(up)
 	}
 	a.act(ctx, d)
+}
+
+func (a *Agent) reloadTLS(files string, reload func() (bool, error)) {
+	category := "tls " + files
+	changed, err := reload()
+	if err != nil {
+		a.logChange(category, slog.LevelWarn, "certificate files refused, keeping the previous ones", err.Error(), "files", files, "error", err)
+		return
+	}
+	delete(a.lastLog, category)
+	if changed {
+		a.logger.Info("certificate files reloaded", "files", files)
+	}
 }
 
 func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
@@ -334,14 +353,7 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		}
 	}
 	wg.Wait()
-	for _, m := range voters {
-		category := "status " + hex(m.ID)
-		if err := statusErrs[m.ID]; err != nil {
-			a.logChange(category, slog.LevelWarn, "member status failed", err.Error(), "member", hex(m.ID), "error", err)
-		} else {
-			delete(a.lastLog, category)
-		}
-	}
+	a.logStatusErrors(statusErrs)
 
 	a.publish(ctx, sees)
 	records, err := a.c.Records(ctx)
@@ -365,6 +377,21 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		}
 	}
 	return obs, nil
+}
+
+// logStatusErrors warns about each member whose status call fails, once
+// while the error lasts.
+func (a *Agent) logStatusErrors(errs map[uint64]error) {
+	const prefix = "status "
+	maps.DeleteFunc(a.lastLog, func(category, _ string) bool {
+		id, err := strconv.ParseUint(strings.TrimPrefix(category, prefix), 16, 64)
+		return strings.HasPrefix(category, prefix) && (err != nil || errs[id] == nil)
+	})
+	for id, err := range errs {
+		if err != nil {
+			a.logChange(prefix+hex(id), slog.LevelWarn, "member status failed", err.Error(), "member", hex(id), "error", err)
+		}
+	}
 }
 
 // servesTLS reports whether an etcd URL uses one of the TLS schemes etcd

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -228,5 +229,60 @@ func TestServesTLS(t *testing.T) {
 		if got := servesTLS(url); got != want {
 			t.Errorf("servesTLS(%q) = %v, want %v", url, got, want)
 		}
+	}
+}
+
+// Reloading closes connections, so it must happen before the poll makes any
+// call, never while calls are in flight.
+func TestTLSFilesAreReloadedBeforeEveryPoll(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeDryRun))
+	for range 3 {
+		h.fake.mu.Lock()
+		h.fake.events = nil
+		h.fake.mu.Unlock()
+		h.ticks(1)
+		h.fake.mu.Lock()
+		events := slices.Clone(h.fake.events)
+		h.fake.mu.Unlock()
+		if len(events) < 3 || !slices.Equal(events[:2], []string{"reload client", "reload peer"}) || slices.Contains(events[2:], "reload client") {
+			t.Fatalf("events of a poll = %v, want both reloads first and only once", events)
+		}
+	}
+}
+
+func TestRefusedTLSFilesAreWarnedOnce(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeDryRun))
+	setErr := func(err error) {
+		h.fake.mu.Lock()
+		defer h.fake.mu.Unlock()
+		h.fake.tlsErr["client"] = err
+		h.fake.tlsErr["peer"] = err
+	}
+	warned := func() int {
+		return strings.Count(h.logs.String(), `"level":"WARN","msg":"certificate files refused, keeping the previous ones"`)
+	}
+	setErr(errors.New("no certificate in /etc/etcd/tls/client/ca.crt"))
+	h.ticks(5)
+	if n := warned(); n != 2 {
+		t.Errorf("refused files warned %d times, want once for the client and once for the prober:\n%s", n, h.logs)
+	}
+	if strings.Contains(h.logs.String(), "poll failed") || h.fake.records[1].Sees == nil {
+		t.Errorf("refused files stopped the poll:\n%s", h.logs)
+	}
+	setErr(nil)
+	h.ticks(1)
+	setErr(errors.New("no certificate in /etc/etcd/tls/client/ca.crt"))
+	h.ticks(1)
+	if n := warned(); n != 4 {
+		t.Errorf("refused files warned %d times after a fix and a new failure, want 4:\n%s", n, h.logs)
+	}
+}
+
+func TestReloadedTLSFilesAreLogged(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeDryRun))
+	h.fake.tlsChanged["peer"] = true
+	h.ticks(3)
+	if n := strings.Count(h.logs.String(), `"msg":"certificate files reloaded","files":"peer"`); n != 1 {
+		t.Errorf("reload logged %d times, want once:\n%s", n, h.logs)
 	}
 }

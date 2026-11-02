@@ -44,6 +44,9 @@ type fakeCluster struct {
 	moveErr     error
 	localErr    error
 	statusErr   map[uint64]error
+	tlsErr      map[string]error
+	tlsChanged  map[string]bool
+	events      []string
 	hang        chan struct{}
 	noPeerCA    bool
 	moves       []uint64
@@ -64,8 +67,23 @@ func newFakeCluster() *fakeCluster {
 		records:    map[uint64]cluster.Record{},
 		leases:     map[int64]bool{},
 		statusErr:  map[uint64]error{},
+		tlsErr:     map[string]error{},
+		tlsChanged: map[string]bool{},
 	}
 }
+
+// reloadTLS stands in for the certificate files of the client ("client") or
+// the prober ("peer"); a change is reported once.
+func (f *fakeCluster) reloadTLS(files string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "reload "+files)
+	changed := f.tlsChanged[files]
+	delete(f.tlsChanged, files)
+	return changed, f.tlsErr[files]
+}
+
+func (f *fakeCluster) ReloadTLS() (bool, error) { return f.reloadTLS("client") }
 
 func (f *fakeCluster) setCut(x, y uint64) {
 	f.mu.Lock()
@@ -116,6 +134,7 @@ func (f *fakeCluster) LocalURL() string { return clientURL(f.self) }
 func (f *fakeCluster) Status(ctx context.Context, u string) (cluster.Status, error) {
 	f.mu.Lock()
 	f.statusCalls = append(f.statusCalls, u)
+	f.events = append(f.events, "status")
 	id := f.idOf(u)
 	if id == f.self && f.localErr != nil {
 		f.mu.Unlock()
@@ -239,6 +258,8 @@ func (f *fakeCluster) movesSoFar() []uint64 {
 type fakeProber struct{ f *fakeCluster }
 
 func (p fakeProber) VerifiesTLS() bool { return !p.f.noPeerCA }
+
+func (p fakeProber) ReloadTLS() (bool, error) { return p.f.reloadTLS("peer") }
 
 func (p fakeProber) Reachable(_ context.Context, peerURLs []string) bool {
 	p.f.mu.Lock()
@@ -474,6 +495,17 @@ func TestCandidateStatusErrorIsWarned(t *testing.T) {
 	}
 	if moves := h.fake.movesSoFar(); len(moves) != 0 {
 		t.Errorf("moves = %v, want none to a member that fails its status call", moves)
+	}
+}
+
+// A member removed while its status call was failing must not keep an entry
+// in the log of situations forever.
+func TestStatusLogOfRemovedMembersIsDropped(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	h.agent.lastLog["status ff"] = "member status failed"
+	h.ticks(1)
+	if _, ok := h.agent.lastLog["status ff"]; ok {
+		t.Errorf("lastLog keeps the status of a member that is gone: %v", h.agent.lastLog)
 	}
 }
 
