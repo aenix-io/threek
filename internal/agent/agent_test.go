@@ -43,6 +43,7 @@ type fakeCluster struct {
 	revoked     []int64
 	moveErr     error
 	localErr    error
+	statusErr   map[uint64]error
 	hang        chan struct{}
 	noPeerCA    bool
 	moves       []uint64
@@ -62,6 +63,7 @@ func newFakeCluster() *fakeCluster {
 		silent:     map[uint64]bool{},
 		records:    map[uint64]cluster.Record{},
 		leases:     map[int64]bool{},
+		statusErr:  map[uint64]error{},
 	}
 }
 
@@ -118,6 +120,10 @@ func (f *fakeCluster) Status(ctx context.Context, u string) (cluster.Status, err
 	if id == f.self && f.localErr != nil {
 		f.mu.Unlock()
 		return cluster.Status{}, f.localErr
+	}
+	if err := f.statusErr[id]; err != nil && id != f.self {
+		f.mu.Unlock()
+		return cluster.Status{}, err
 	}
 	if f.hang != nil {
 		hang := f.hang
@@ -438,6 +444,36 @@ func TestUnhealthyCandidate(t *testing.T) {
 				t.Errorf("moves = %v, want none", moves)
 			}
 		})
+	}
+}
+
+// Whether a candidate answers its status call decides whether leadership
+// moves, so a failing call is a warning, logged once while it lasts.
+func TestCandidateStatusErrorIsWarned(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	setErr := func(err error) {
+		h.fake.mu.Lock()
+		defer h.fake.mu.Unlock()
+		h.fake.statusErr[3] = err
+	}
+	warned := func() int {
+		return strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3"`)
+	}
+	setErr(errors.New("tls: failed to verify certificate"))
+	h.ticks(3)
+	if n := warned(); n != 1 {
+		t.Errorf("status error of member 3 warned %d times, want once:\n%s", n, h.logs)
+	}
+	setErr(nil)
+	h.ticks(1)
+	setErr(errors.New("tls: failed to verify certificate"))
+	h.fake.setCut(1, 2)
+	h.ticks(10)
+	if n := warned(); n != 2 {
+		t.Errorf("status error of member 3 warned %d times after it came back, want twice:\n%s", n, h.logs)
+	}
+	if moves := h.fake.movesSoFar(); len(moves) != 0 {
+		t.Errorf("moves = %v, want none to a member that fails its status call", moves)
 	}
 }
 

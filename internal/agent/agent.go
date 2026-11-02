@@ -308,6 +308,7 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	}
 	sees := map[uint64]bool{}
 	healthy := map[uint64]bool{local.MemberID: true}
+	statusErrs := map[uint64]error{}
 	remoteCtx, cancel := context.WithTimeout(ctx, a.remoteTimeout)
 	defer cancel()
 	var mu sync.Mutex
@@ -324,14 +325,23 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		})
 		if leading {
 			wg.Go(func() {
-				ok := a.healthy(remoteCtx, m, local)
+				ok, err := a.healthy(remoteCtx, m, local)
 				mu.Lock()
 				defer mu.Unlock()
 				healthy[m.ID] = ok
+				statusErrs[m.ID] = err
 			})
 		}
 	}
 	wg.Wait()
+	for _, m := range voters {
+		category := "status " + hex(m.ID)
+		if err := statusErrs[m.ID]; err != nil {
+			a.logChange(category, slog.LevelWarn, "member status failed", err.Error(), "member", hex(m.ID), "error", err)
+		} else {
+			delete(a.lastLog, category)
+		}
+	}
 
 	a.publish(ctx, sees)
 	records, err := a.c.Records(ctx)
@@ -364,12 +374,14 @@ func servesTLS(url string) bool {
 }
 
 // healthy reports whether member m belongs to the local cluster and can take
-// over leadership.
-func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) bool {
+// over leadership. The error is that of the status calls when none of them
+// succeeded.
+func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) (bool, error) {
+	var errs []error
 	for _, url := range m.ClientURLs {
 		st, err := a.c.Status(ctx, url)
 		if err != nil {
-			a.logger.Debug("member status", "member", hex(m.ID), "url", url, "error", err)
+			errs = append(errs, err)
 			continue
 		}
 		if st.ClusterID != local.ClusterID || st.MemberID != m.ID {
@@ -378,9 +390,9 @@ func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Sta
 			continue
 		}
 		lag := local.AppliedIndex - min(local.AppliedIndex, st.AppliedIndex)
-		return len(st.Errors) == 0 && lag <= maxAppliedLag
+		return len(st.Errors) == 0 && lag <= maxAppliedLag, nil
 	}
-	return false
+	return false, errors.Join(errs...)
 }
 
 // publish keeps the member's record current. The lease is renewed on every
