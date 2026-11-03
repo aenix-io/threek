@@ -7,21 +7,21 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
-
-	"go.etcd.io/etcd/client/pkg/v3/transport"
 )
 
 // Source is a client TLS config backed by a certificate, its key and the CA
-// that verifies servers. Any of them may be empty.
+// that verifies servers. Any of them may be empty, but not the certificate
+// without its key.
 //
-// The config is rebuilt rather than verified by hand on every handshake:
-// etcd already reloads the certificate itself per handshake, but the CA pool
-// cannot be swapped without turning off Go's own server verification.
+// The config holds the certificate and CA as read by the last successful
+// Reload and never reads the files on a handshake, so files rewritten one
+// after another cannot break new connections halfway through a rotation.
 type Source struct {
-	info transport.TLSInfo
+	certFile, keyFile, caFile string
 
 	mu      sync.Mutex
 	content []byte
@@ -30,9 +30,10 @@ type Source struct {
 
 // New reads the files and fails when they do not make a valid config.
 func New(certFile, keyFile, caFile string) (*Source, error) {
-	s := &Source{
-		info: transport.TLSInfo{CertFile: certFile, KeyFile: keyFile, TrustedCAFile: caFile},
+	if (certFile == "") != (keyFile == "") {
+		return nil, errors.New("a certificate file needs a key file and the other way round")
 	}
+	s := &Source{certFile: certFile, keyFile: keyFile, caFile: caFile}
 	if _, err := s.Reload(); err != nil {
 		return nil, err
 	}
@@ -53,16 +54,23 @@ func (s *Source) Config() *tls.Config {
 func (s *Source) Reload() (changed bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	content, err := s.read()
-	if err != nil {
-		return false, err
+	var cert, key, ca []byte
+	for _, f := range []struct {
+		path    string
+		content *[]byte
+	}{{s.certFile, &cert}, {s.keyFile, &key}, {s.caFile, &ca}} {
+		if f.path == "" {
+			continue
+		}
+		if *f.content, err = os.ReadFile(f.path); err != nil {
+			return false, err
+		}
 	}
+	content := bytes.Join([][]byte{cert, key, ca}, []byte{0})
 	if s.config != nil && bytes.Equal(content, s.content) {
 		return false, nil
 	}
-	// ClientConfig reads the files once more; a change in between only makes
-	// the next Reload rebuild the config again.
-	cfg, err := s.info.ClientConfig()
+	cfg, err := s.build(cert, key, ca)
 	if err != nil {
 		return false, err
 	}
@@ -71,23 +79,26 @@ func (s *Source) Reload() (changed bool, err error) {
 	return changed, nil
 }
 
-// read returns the content of every file. It rejects a CA file without
-// certificates, which etcd would turn into a pool that trusts no server.
-func (s *Source) read() ([]byte, error) {
-	var all []byte
-	for _, f := range []string{s.info.CertFile, s.info.KeyFile, s.info.TrustedCAFile} {
-		if f == "" {
-			continue
-		}
-		content, err := os.ReadFile(f) //nolint:gosec // the paths are the agent's own flags
+func (s *Source) build(cert, key, ca []byte) (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if s.certFile != "" {
+		pair, err := tls.X509KeyPair(cert, key)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s and %s: %w", s.certFile, s.keyFile, err)
 		}
-		if f == s.info.TrustedCAFile && !x509.NewCertPool().AppendCertsFromPEM(content) {
-			return nil, fmt.Errorf("no certificate in %s", f)
+		// Certificates would be offered only to servers whose accepted CAs
+		// include the issuer; like etcd, always present the certificate and
+		// let the server decide.
+		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &pair, nil
 		}
-		all = append(all, content...)
-		all = append(all, 0)
 	}
-	return all, nil
+	if s.caFile != "" {
+		cfg.RootCAs = x509.NewCertPool()
+		// An empty pool would trust no server.
+		if !cfg.RootCAs.AppendCertsFromPEM(ca) {
+			return nil, fmt.Errorf("no certificate in %s", s.caFile)
+		}
+	}
+	return cfg, nil
 }

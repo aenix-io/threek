@@ -126,28 +126,41 @@ func ownFiles(t *testing.T, m *etcdtest.Member) etcdconf.Settings {
 	return s
 }
 
+// Status calls to members without a cached connection make new handshakes,
+// which must use the files read before they broke.
 func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
 	cl := etcdtest.Start(t, 3)
 	ctx := timeout(t)
-	s := ownFiles(t, cl.Members[0])
-	c, err := New(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
-	if _, err := c.Status(ctx, c.LocalURL()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(s.TrustedCAFile, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if changed, err := c.ReloadTLS(); changed || err == nil {
-		t.Errorf("ReloadTLS() = %v, %v with an empty CA file; want an error and no change", changed, err)
-	}
-	for _, m := range cl.Members {
-		if _, err := c.Status(ctx, m.ClientURL); err != nil {
-			t.Errorf("Status(%s) with the previous config error = %v", m.Name, err)
-		}
+	for name, breakFiles := range map[string]func(t *testing.T, s etcdconf.Settings){
+		"empty CA": func(t *testing.T, s etcdconf.Settings) {
+			if err := os.WriteFile(s.TrustedCAFile, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"key of another certificate": func(t *testing.T, s etcdconf.Settings) {
+			etcdtest.Replace(t, s.KeyFile, cl.Members[1].Settings.KeyFile)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := ownFiles(t, cl.Members[0])
+			c, err := New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			if _, err := c.Status(ctx, c.LocalURL()); err != nil {
+				t.Fatal(err)
+			}
+			breakFiles(t, s)
+			if changed, err := c.ReloadTLS(); changed || err == nil {
+				t.Errorf("ReloadTLS() = %v, %v with broken files; want an error and no change", changed, err)
+			}
+			for _, m := range cl.Members {
+				if _, err := c.Status(ctx, m.ClientURL); err != nil {
+					t.Errorf("Status(%s) with the previous config error = %v", m.Name, err)
+				}
+			}
+		})
 	}
 }
 

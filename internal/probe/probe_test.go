@@ -156,23 +156,33 @@ func TestRotatedFilesTakeEffect(t *testing.T) {
 }
 
 func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
-	p, ca, dir := newProber(t)
-	url := peer(t, ca, dir, probing(t))
-	if err := os.WriteFile(ca.CertFile, []byte("not a certificate"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if changed, err := p.ReloadTLS(); changed || err == nil {
-		t.Errorf("ReloadTLS() = %v, %v with a broken CA file; want an error and no change", changed, err)
-	}
-	// Without idle connections the probe makes a new one with the previous config.
-	p.Close()
-	if !p.Reachable(context.Background(), []string{url}) {
-		t.Error("Reachable() = false with the previous config")
+	for name, breakFiles := range map[string]func(t *testing.T, ca *etcdtest.CA, dir string){
+		"not a CA": func(t *testing.T, ca *etcdtest.CA, _ string) {
+			if err := os.WriteFile(ca.CertFile, []byte("not a certificate"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"key of another certificate": func(t *testing.T, ca *etcdtest.CA, dir string) {
+			_, key := ca.Issue(t, t.TempDir(), "other")
+			etcdtest.Replace(t, filepath.Join(dir, "client.key"), key)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, ca, dir := newProber(t)
+			url := peer(t, ca, dir, probing(t))
+			breakFiles(t, ca, dir)
+			if changed, err := p.ReloadTLS(); changed || err == nil {
+				t.Errorf("ReloadTLS() = %v, %v with broken files; want an error and no change", changed, err)
+			}
+			// Without idle connections the probe makes a new one with the previous config.
+			p.Close()
+			if !p.Reachable(context.Background(), []string{url}) {
+				t.Error("Reachable() = false with the previous config")
+			}
+		})
 	}
 }
 
-// Connections made with old files are closed on reload, so they neither stay
-// open on the peer nor keep presenting an old certificate.
 func TestReloadClosesOldConnections(t *testing.T) {
 	p, ca, dir := newProber(t)
 	var mu sync.Mutex

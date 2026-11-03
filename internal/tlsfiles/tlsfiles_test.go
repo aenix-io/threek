@@ -80,6 +80,9 @@ func TestNewRejectsMissingFiles(t *testing.T) {
 	if _, err := New(filepath.Join(t.TempDir(), "missing.crt"), f.key, f.ca); err == nil {
 		t.Error("New() error = nil with a missing certificate file")
 	}
+	if _, err := New(f.cert, "", f.ca); err == nil {
+		t.Error("New() error = nil with a certificate file but no key file")
+	}
 }
 
 func TestUnchangedFilesKeepTheConfig(t *testing.T) {
@@ -132,10 +135,13 @@ func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
 			}
 		},
 		// Talos rewrites the files in place, one after another.
-		"key of another certificate": func(t *testing.T, f files) { etcdtest.Replace(t, f.key, issue(t).key) },
+		"key of another certificate":  func(t *testing.T, f files) { etcdtest.Replace(t, f.key, issue(t).key) },
+		"certificate of another key":  func(t *testing.T, f files) { etcdtest.Replace(t, f.cert, issue(t).cert) },
+		"certificate without its key": func(t *testing.T, f files) { write(t, f.key, nil) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := issue(t)
+			url := server(t, f)
 			s := newSource(t, f)
 			before := s.Config()
 			breakFiles(t, f)
@@ -147,6 +153,9 @@ func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
 				if changed || s.Config() != before {
 					t.Errorf("Reload() changed = %v, same config = %v; want the previous config", changed, s.Config() == before)
 				}
+			}
+			if err := get(t, s.Config(), url); err != nil {
+				t.Errorf("handshake with the previous config: %v", err)
 			}
 		})
 	}
