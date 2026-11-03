@@ -24,9 +24,9 @@ const path = "/raft/probing"
 // few dozen bytes.
 const maxBody = 64 << 10
 
-// idleTimeout closes a connection that no probe has used for a while. It
-// also bounds the connection of a probe still in flight during ReloadTLS,
-// which returns to a transport that is never closed again.
+// idleTimeout closes a connection that no probe has used for a while. It is
+// also the backstop for ReloadTLS, which closes only idle connections: one
+// in use at that moment returns to a transport nothing closes again.
 const idleTimeout = 90 * time.Second
 
 type Prober struct {
@@ -68,9 +68,9 @@ func (p *Prober) Close() {
 }
 
 // ReloadTLS reads the peer certificate files again. When they changed, the
-// idle connections made with the old files are closed; a probe in flight
-// keeps its connection until idleTimeout. When the files are broken, the
-// previous files stay in use.
+// idle connections made with the old files are closed, so call it between
+// probes; a connection in use at that moment stays open until idleTimeout.
+// When the files are broken, the previous files stay in use.
 func (p *Prober) ReloadTLS() (changed bool, err error) {
 	if p.files == nil {
 		return false, nil

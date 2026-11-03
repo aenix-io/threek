@@ -100,6 +100,8 @@ func (c *Client) ReloadTLS() (changed bool, err error) {
 	if changed {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		// The clients are dropped and the new files are in use whatever
+		// Close returns, so its error leaves nothing to act on.
 		_ = c.closeClients()
 	}
 	return changed, nil
