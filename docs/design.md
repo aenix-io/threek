@@ -139,7 +139,11 @@ Both Talos and etcd-operator include `localhost` and `127.0.0.1` in the etcd ser
 - With etcd-operator the agent uses the member's server certificate, which also has the `ClientAuth` extended key usage, as its client certificate, and the member's peer certificate for probes.
 - On Talos it uses the kube-apiserver client certificate for both.
 
-The client certificate and key are read again on every TLS handshake, so a renewed certificate is picked up on the next connection. The CA is read once at start.
+At the start of every poll, before any call, the agent reads the certificate, key and CA files of both the client connection and the probes again; so does the poll that withdraws the record when the agent is switched off.
+When any of them changed, it rebuilds the TLS config and closes the connections made with the old files, so a renewed certificate or a rotated CA takes effect without a restart.
+Files that cannot be read or do not make a valid config, such as an empty CA file or a key written before its certificate, are refused with a warning; the agent keeps polling with the previous files until they are fixed.
+
+A leader's agent logs a warning when a transfer candidate has no client URL, fails its status call or its URL answers for another member, since that alone keeps leadership from moving to it. The warning repeats only when the kind of failure changes, not its wording.
 
 ## Connectivity signal
 
@@ -363,7 +367,7 @@ Every pull request runs:
 - **Unit tests** for the decision engine. It is a pure function, so each scenario from the table above is a table-driven case, including flapping, unknown rows, duplicate identities, learners and cooldown.
 - **Unit tests** for settings: flags, the ConfigMap layout kubelet mounts, and settings the ConfigMap may not carry.
 - **Unit tests** for reloading: mode switches without restart, invalid settings keep the previous ones, `off` withdraws the record and forgets the link history.
-- **Integration tests** against real etcd processes with mTLS: the etcd client calls, the probes and the return to the preferred leader with three agents.
+- **Integration tests** against real etcd processes with mTLS: the etcd client calls, the probes, certificate files rotated in place, and the return to the preferred leader with three agents.
 - **End-to-end tests**: three upstream etcd containers, each with an agent container in its network namespace as the Talos static Pod runs it, with links broken by `iptables` drop rules. They assert that:
   - the leader moves after a partial partition, the leader's agent counts the transfer, and clients of the cut-off member can write again;
   - the leader settles on the preferred member, leaves it when the preferred member is the one cut off, and returns after the partition heals;

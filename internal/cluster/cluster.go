@@ -14,11 +14,11 @@ import (
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
 	"github.com/aenix-io/threek/internal/etcdconf"
+	"github.com/aenix-io/threek/internal/tlsfiles"
 )
 
 const (
@@ -66,30 +66,52 @@ type Record struct {
 // member's own certificate.
 type Client struct {
 	localURL string
-	tls      *tls.Config
+	files    *tlsfiles.Source
 
 	mu      sync.Mutex
 	clients map[string]*clientv3.Client
 }
 
 func New(s etcdconf.Settings) (*Client, error) {
-	localURL := s.Endpoint
-	var tlsConfig *tls.Config
-	if strings.HasPrefix(localURL, "https://") {
+	c := &Client{localURL: s.Endpoint, clients: map[string]*clientv3.Client{}}
+	if strings.HasPrefix(c.localURL, "https://") {
 		if s.TrustedCAFile == "" {
 			return nil, errors.New("etcd serves TLS but has no trusted CA file to verify it with")
 		}
-		info := transport.TLSInfo{CertFile: s.CertFile, KeyFile: s.KeyFile, TrustedCAFile: s.TrustedCAFile}
 		var err error
-		if tlsConfig, err = info.ClientConfig(); err != nil {
+		if c.files, err = tlsfiles.New(s.CertFile, s.KeyFile, s.TrustedCAFile); err != nil {
 			return nil, fmt.Errorf("client TLS: %w", err)
 		}
 	}
-	return &Client{
-		localURL: localURL,
-		tls:      tlsConfig,
-		clients:  map[string]*clientv3.Client{},
-	}, nil
+	return c, nil
+}
+
+// ReloadTLS reads the certificate files again. When they changed, every
+// connection is made again with the new files; calls in flight on the old
+// connections fail. When they are broken, the previous files stay in use.
+func (c *Client) ReloadTLS() (changed bool, err error) {
+	if c.files == nil {
+		return false, nil
+	}
+	changed, err = c.files.Reload()
+	if err != nil {
+		return false, fmt.Errorf("client TLS: %w", err)
+	}
+	if changed {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// The clients are dropped and the new files are in use whatever
+		// Close returns, so its error leaves nothing to act on.
+		_ = c.closeClients()
+	}
+	return changed, nil
+}
+
+func (c *Client) tlsConfig() *tls.Config {
+	if c.files == nil {
+		return nil
+	}
+	return c.files.Config()
 }
 
 func (c *Client) LocalURL() string {
@@ -99,6 +121,10 @@ func (c *Client) LocalURL() string {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.closeClients()
+}
+
+func (c *Client) closeClients() error {
 	var errs []error
 	for _, cli := range c.clients {
 		errs = append(errs, cli.Close())
@@ -117,7 +143,7 @@ func (c *Client) client(url string) (*clientv3.Client, error) {
 	}
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   []string{url},
-		TLS:         c.tls,
+		TLS:         c.tlsConfig(),
 		DialTimeout: dialTimeout,
 		Logger:      zap.NewNop(),
 	})

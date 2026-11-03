@@ -1,6 +1,8 @@
 GOLANGCI_LINT ?= golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty)
 IMAGE ?= ghcr.io/aenix-io/threek-agent:$(VERSION)
+TEST_ETCD_BINARY ?= $(shell command -v etcd)
+export TEST_ETCD_BINARY
 
 .PHONY: build test lint image
 

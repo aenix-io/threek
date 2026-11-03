@@ -9,11 +9,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-
 	"github.com/aenix-io/threek/internal/etcdconf"
+	"github.com/aenix-io/threek/internal/tlsfiles"
 )
 
 // path is etcd's rafthttp.ProbingPrefix. A bare TCP connect would not do:
@@ -24,38 +24,75 @@ const path = "/raft/probing"
 // few dozen bytes.
 const maxBody = 64 << 10
 
+// idleTimeout closes a connection that no probe has used for a while. It is
+// also the backstop for ReloadTLS, which closes only idle connections: one
+// in use at that moment returns to a transport nothing closes again.
+const idleTimeout = 90 * time.Second
+
 type Prober struct {
-	client      *http.Client
-	timeout     time.Duration
-	verifiesTLS bool
+	files   *tlsfiles.Source
+	timeout time.Duration
+
+	mu     sync.Mutex
+	client *http.Client
 }
 
 // New returns a prober that authenticates with the member's peer certificate
 // and gives up on a peer after timeout.
 func New(s etcdconf.Settings, timeout time.Duration) (*Prober, error) {
+	p := &Prober{timeout: timeout}
 	var tlsConfig *tls.Config
 	if s.PeerTrustedCAFile != "" {
-		info := transport.TLSInfo{CertFile: s.PeerCertFile, KeyFile: s.PeerKeyFile, TrustedCAFile: s.PeerTrustedCAFile}
 		var err error
-		if tlsConfig, err = info.ClientConfig(); err != nil {
+		if p.files, err = tlsfiles.New(s.PeerCertFile, s.PeerKeyFile, s.PeerTrustedCAFile); err != nil {
 			return nil, fmt.Errorf("peer TLS: %w", err)
 		}
+		tlsConfig = p.files.Config()
 	}
-	return &Prober{
-		client:      &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}},
-		timeout:     timeout,
-		verifiesTLS: tlsConfig != nil,
-	}, nil
+	p.client = newHTTPClient(tlsConfig)
+	return p, nil
+}
+
+func newHTTPClient(tlsConfig *tls.Config) *http.Client {
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig, IdleConnTimeout: idleTimeout}}
 }
 
 // VerifiesTLS reports whether a peer CA was given, without which no peer
 // serving TLS can be verified.
 func (p *Prober) VerifiesTLS() bool {
-	return p.verifiesTLS
+	return p.files != nil
 }
 
 func (p *Prober) Close() {
-	p.client.CloseIdleConnections()
+	p.httpClient().CloseIdleConnections()
+}
+
+// ReloadTLS reads the peer certificate files again. When they changed, the
+// idle connections made with the old files are closed, so call it between
+// probes; a connection in use at that moment stays open until idleTimeout.
+// When the files are broken, the previous files stay in use.
+func (p *Prober) ReloadTLS() (changed bool, err error) {
+	if p.files == nil {
+		return false, nil
+	}
+	changed, err = p.files.Reload()
+	if err != nil {
+		return false, fmt.Errorf("peer TLS: %w", err)
+	}
+	if changed {
+		p.mu.Lock()
+		old := p.client
+		p.client = newHTTPClient(p.files.Config())
+		p.mu.Unlock()
+		old.CloseIdleConnections()
+	}
+	return changed, nil
+}
+
+func (p *Prober) httpClient() *http.Client {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.client
 }
 
 // Reachable reports whether any of a member's peer URLs answers in time.
@@ -75,7 +112,7 @@ func (p *Prober) probe(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := p.client.Do(req)
+	resp, err := p.httpClient().Do(req)
 	if err != nil {
 		return false
 	}

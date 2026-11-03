@@ -331,3 +331,20 @@ func writePEM(t *testing.T, path, typ string, der []byte) {
 		t.Fatal(err)
 	}
 }
+
+// Replace overwrites dst with the content of src in one step, the way kubelet
+// updates the files of a mounted Secret.
+func Replace(t *testing.T, dst, src string) {
+	t.Helper()
+	content, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		t.Fatal(err)
+	}
+}

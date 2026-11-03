@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,6 +124,114 @@ func TestAnyURLIsEnough(t *testing.T) {
 	}
 }
 
+// A peer restarted after a CA rotation trusts only the new CA and presents
+// a certificate of it; the agent must follow the rotated files without a
+// restart.
+func TestRotatedFilesTakeEffect(t *testing.T) {
+	dir := t.TempDir()
+	ca := etcdtest.NewCA(t, dir)
+	certFile, keyFile := ca.Issue(t, dir, "client")
+	p, err := New(etcdconf.Settings{PeerCertFile: certFile, PeerKeyFile: keyFile, PeerTrustedCAFile: ca.CertFile}, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+
+	newDir := t.TempDir()
+	newCA := etcdtest.NewCA(t, newDir)
+	url := peer(t, newCA, newDir, probing(t))
+	if p.Reachable(context.Background(), []string{url}) {
+		t.Fatal("Reachable() = true before the rotation")
+	}
+	newCert, newKey := newCA.Issue(t, newDir, "client")
+	etcdtest.Replace(t, certFile, newCert)
+	etcdtest.Replace(t, keyFile, newKey)
+	etcdtest.Replace(t, ca.CertFile, newCA.CertFile)
+	if changed, err := p.ReloadTLS(); !changed || err != nil {
+		t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+	}
+	if !p.Reachable(context.Background(), []string{url}) {
+		t.Error("Reachable() = false after the rotation")
+	}
+}
+
+func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
+	for name, breakFiles := range map[string]func(t *testing.T, ca *etcdtest.CA, dir string){
+		"not a CA": func(t *testing.T, ca *etcdtest.CA, _ string) {
+			if err := os.WriteFile(ca.CertFile, []byte("not a certificate"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"key of another certificate": func(t *testing.T, ca *etcdtest.CA, dir string) {
+			_, key := ca.Issue(t, t.TempDir(), "other")
+			etcdtest.Replace(t, filepath.Join(dir, "client.key"), key)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, ca, dir := newProber(t)
+			url := peer(t, ca, dir, probing(t))
+			breakFiles(t, ca, dir)
+			if changed, err := p.ReloadTLS(); changed || err == nil {
+				t.Errorf("ReloadTLS() = %v, %v with broken files; want an error and no change", changed, err)
+			}
+			// Without idle connections the probe makes a new one with the previous config.
+			p.Close()
+			if !p.Reachable(context.Background(), []string{url}) {
+				t.Error("Reachable() = false with the previous config")
+			}
+		})
+	}
+}
+
+func TestReloadClosesOldConnections(t *testing.T) {
+	p, ca, dir := newProber(t)
+	var mu sync.Mutex
+	open := map[net.Conn]bool{}
+	srv := peerServer(t, ca, dir, probing(t), func(c net.Conn, state http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch state {
+		case http.StateNew:
+			open[c] = true
+		case http.StateClosed, http.StateHijacked:
+			delete(open, c)
+		}
+	})
+	openConns := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			mu.Lock()
+			n := len(open)
+			mu.Unlock()
+			if n == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d connections open, want %d", n, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	for _, name := range []string{"renewed", "renewed-again"} {
+		if !p.Reachable(context.Background(), []string{srv.URL}) {
+			t.Fatal("Reachable() = false, want true")
+		}
+		cert, key := ca.Issue(t, t.TempDir(), name)
+		etcdtest.Replace(t, filepath.Join(dir, "client.crt"), cert)
+		etcdtest.Replace(t, filepath.Join(dir, "client.key"), key)
+		if changed, err := p.ReloadTLS(); !changed || err != nil {
+			t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+		}
+		openConns(0)
+	}
+	if !p.Reachable(context.Background(), []string{srv.URL}) {
+		t.Fatal("Reachable() = false, want true")
+	}
+	p.Close()
+	openConns(0)
+}
+
 func TestUntrustedPeer(t *testing.T) {
 	p, _, _ := newProber(t)
 	otherDir := t.TempDir()
@@ -207,5 +317,17 @@ func TestProbesReuseTheConnection(t *testing.T) {
 	}
 	if n := conns.Load(); n != 1 {
 		t.Errorf("5 probes opened %d connections, want 1", n)
+	}
+}
+
+// A probe that ends after ReloadTLS returns its connection to the old
+// transport, which nothing closes again.
+func TestIdleConnectionsAreBounded(t *testing.T) {
+	transport, ok := newHTTPClient(nil).Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", newHTTPClient(nil).Transport)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Errorf("IdleConnTimeout = %v, want a bound", transport.IdleConnTimeout)
 	}
 }

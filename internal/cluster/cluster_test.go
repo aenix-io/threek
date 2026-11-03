@@ -3,7 +3,10 @@ package cluster
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,6 +74,133 @@ func TestStatusAndMembers(t *testing.T) {
 		if remote.MemberID != m.ID || remote.ClusterID != local.ClusterID {
 			t.Errorf("remote status = %+v, want member %x of cluster %x", remote, m.ID, local.ClusterID)
 		}
+	}
+}
+
+// The client must follow its certificate files when they are rotated in
+// place: here they start out issued by a CA the cluster does not trust.
+func TestRotatedFilesTakeEffect(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	m := cl.Members[0]
+	dir := t.TempDir()
+	other := etcdtest.NewCA(t, dir)
+	certFile, keyFile := other.Issue(t, dir, "agent")
+	caFile := filepath.Join(dir, "trusted-ca.crt")
+	etcdtest.Replace(t, caFile, other.CertFile)
+	c, err := New(etcdconf.Settings{Endpoint: m.ClientURL, CertFile: certFile, KeyFile: keyFile, TrustedCAFile: caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	short, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := c.Status(short, m.ClientURL); err == nil {
+		t.Fatal("Status() error = nil with certificates of another CA")
+	}
+	etcdtest.Replace(t, certFile, m.Settings.CertFile)
+	etcdtest.Replace(t, keyFile, m.Settings.KeyFile)
+	etcdtest.Replace(t, caFile, m.Settings.TrustedCAFile)
+	if changed, err := c.ReloadTLS(); !changed || err != nil {
+		t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+	}
+	if _, err := c.Status(ctx, m.ClientURL); err != nil {
+		t.Errorf("Status() after the rotation error = %v", err)
+	}
+}
+
+// ownFiles copies m's files, so a test can break them without breaking etcd.
+func ownFiles(t *testing.T, m *etcdtest.Member) etcdconf.Settings {
+	t.Helper()
+	dir := t.TempDir()
+	s := etcdconf.Settings{
+		Endpoint:      m.ClientURL,
+		CertFile:      filepath.Join(dir, "tls.crt"),
+		KeyFile:       filepath.Join(dir, "tls.key"),
+		TrustedCAFile: filepath.Join(dir, "ca.crt"),
+	}
+	etcdtest.Replace(t, s.CertFile, m.Settings.CertFile)
+	etcdtest.Replace(t, s.KeyFile, m.Settings.KeyFile)
+	etcdtest.Replace(t, s.TrustedCAFile, m.Settings.TrustedCAFile)
+	return s
+}
+
+// Status calls to members without a cached connection make new handshakes,
+// which must use the files read before they broke.
+func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	for name, breakFiles := range map[string]func(t *testing.T, s etcdconf.Settings){
+		"empty CA": func(t *testing.T, s etcdconf.Settings) {
+			if err := os.WriteFile(s.TrustedCAFile, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"key of another certificate": func(t *testing.T, s etcdconf.Settings) {
+			etcdtest.Replace(t, s.KeyFile, cl.Members[1].Settings.KeyFile)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := ownFiles(t, cl.Members[0])
+			c, err := New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			if _, err := c.Status(ctx, c.LocalURL()); err != nil {
+				t.Fatal(err)
+			}
+			breakFiles(t, s)
+			if changed, err := c.ReloadTLS(); changed || err == nil {
+				t.Errorf("ReloadTLS() = %v, %v with broken files; want an error and no change", changed, err)
+			}
+			for _, m := range cl.Members {
+				if _, err := c.Status(ctx, m.ClientURL); err != nil {
+					t.Errorf("Status(%s) with the previous config error = %v", m.Name, err)
+				}
+			}
+		})
+	}
+}
+
+// Rotated files take effect only on ReloadTLS, so status calls in flight
+// while the files change keep their connections.
+func TestStatusCallsDuringRotation(t *testing.T) {
+	cl := etcdtest.Start(t, 3)
+	ctx := timeout(t)
+	s := ownFiles(t, cl.Members[0])
+	c, err := New(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	errs := make(chan error, len(cl.Members))
+	var wg sync.WaitGroup
+	for _, m := range cl.Members {
+		wg.Go(func() {
+			for range 20 {
+				if _, err := c.Status(ctx, m.ClientURL); err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	other := cl.Members[1].Settings
+	etcdtest.Replace(t, s.CertFile, other.CertFile)
+	etcdtest.Replace(t, s.KeyFile, other.KeyFile)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Status() while the files changed error = %v", err)
+	}
+	if changed, err := c.ReloadTLS(); !changed || err != nil {
+		t.Fatalf("ReloadTLS() = %v, %v; want a change", changed, err)
+	}
+	if _, err := c.Status(ctx, c.LocalURL()); err != nil {
+		t.Errorf("Status() after ReloadTLS error = %v", err)
 	}
 }
 

@@ -15,6 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/aenix-io/threek/internal/cluster"
 	"github.com/aenix-io/threek/internal/config"
 	"github.com/aenix-io/threek/internal/engine"
@@ -56,12 +60,14 @@ type Cluster interface {
 	PutRecord(ctx context.Context, id uint64, r cluster.Record, lease int64) error
 	RenewLease(ctx context.Context, lease int64) error
 	RevokeLease(ctx context.Context, lease int64) error
+	ReloadTLS() (changed bool, err error)
 }
 
 type Prober interface {
 	Reachable(ctx context.Context, peerURLs []string) bool
 	// VerifiesTLS reports whether the prober can verify peers that serve TLS.
 	VerifiesTLS() bool
+	ReloadTLS() (changed bool, err error)
 }
 
 // Run connects to the local member and runs the agent until ctx is done.
@@ -250,6 +256,10 @@ func (a *Agent) watchdog(ctx context.Context) {
 // decision.
 func (a *Agent) Tick(ctx context.Context) {
 	a.reload()
+	// Reloading closes the connections made with old files, so it runs
+	// before any call, the revoke of a switch off included.
+	a.reloadTLS("client", a.c.ReloadTLS)
+	a.reloadTLS("peer", a.prober.ReloadTLS)
 	if a.cfg.Mode == config.ModeOff {
 		a.withdraw(ctx)
 		a.metrics.linkUp.Reset()
@@ -277,6 +287,19 @@ func (a *Agent) Tick(ctx context.Context) {
 		a.metrics.linkUp.WithLabelValues(hex(uint64(l.From)), hex(uint64(l.To))).Set(up)
 	}
 	a.act(ctx, d)
+}
+
+func (a *Agent) reloadTLS(files string, reload func() (bool, error)) {
+	category := "tls " + files
+	changed, err := reload()
+	if err != nil {
+		a.logChange(category, slog.LevelWarn, "certificate files refused, keeping the previous ones", err.Error(), "files", files, "error", err)
+		return
+	}
+	delete(a.lastLog, category)
+	if changed {
+		a.logger.Info("certificate files reloaded", "files", files)
+	}
 }
 
 func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
@@ -308,6 +331,7 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	}
 	sees := map[uint64]bool{}
 	healthy := map[uint64]bool{local.MemberID: true}
+	statusErrs := map[uint64]error{}
 	remoteCtx, cancel := context.WithTimeout(ctx, a.remoteTimeout)
 	defer cancel()
 	var mu sync.Mutex
@@ -324,14 +348,16 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 		})
 		if leading {
 			wg.Go(func() {
-				ok := a.healthy(remoteCtx, m, local)
+				ok, err := a.healthy(remoteCtx, m, local)
 				mu.Lock()
 				defer mu.Unlock()
 				healthy[m.ID] = ok
+				statusErrs[m.ID] = err
 			})
 		}
 	}
 	wg.Wait()
+	a.logStatusErrors(statusErrs)
 
 	a.publish(ctx, sees)
 	records, err := a.c.Records(ctx)
@@ -357,6 +383,47 @@ func (a *Agent) observe(ctx context.Context) (engine.Observation, error) {
 	return obs, nil
 }
 
+// logStatusErrors warns about each member whose status call fails, once
+// while the error lasts.
+func (a *Agent) logStatusErrors(errs map[uint64]error) {
+	const prefix = "status "
+	maps.DeleteFunc(a.lastLog, func(category, _ string) bool {
+		id, err := strconv.ParseUint(strings.TrimPrefix(category, prefix), 16, 64)
+		return strings.HasPrefix(category, prefix) && (err != nil || errs[id] == nil)
+	})
+	for id, err := range errs {
+		if err != nil {
+			a.logChange(prefix+hex(id), slog.LevelWarn, "member status failed", errorKind(err), "member", hex(id), "error", err)
+		}
+	}
+}
+
+// errorKind names the situation behind err for logChange. gRPC words the
+// error of the same unreachable member differently on every call, so its
+// code stands in for the text.
+func errorKind(err error) string {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var kinds []string
+		for _, e := range joined.Unwrap() {
+			kinds = append(kinds, errorKind(e))
+		}
+		return strings.Join(kinds, "\n")
+	}
+	var etcdErr rpctypes.EtcdError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return codes.DeadlineExceeded.String()
+	case errors.Is(err, context.Canceled):
+		return codes.Canceled.String()
+	case errors.As(err, &etcdErr):
+		return etcdErr.Code().String()
+	}
+	if st, ok := status.FromError(err); ok {
+		return st.Code().String()
+	}
+	return err.Error()
+}
+
 // servesTLS reports whether an etcd URL uses one of the TLS schemes etcd
 // accepts.
 func servesTLS(url string) bool {
@@ -364,23 +431,27 @@ func servesTLS(url string) bool {
 }
 
 // healthy reports whether member m belongs to the local cluster and can take
-// over leadership.
-func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) bool {
+// over leadership. When no URL answers for m, the error tells why for each
+// of them.
+func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) (bool, error) {
+	if len(m.ClientURLs) == 0 {
+		return false, errors.New("no client URLs")
+	}
+	var errs []error
 	for _, url := range m.ClientURLs {
 		st, err := a.c.Status(ctx, url)
 		if err != nil {
-			a.logger.Debug("member status", "member", hex(m.ID), "url", url, "error", err)
+			errs = append(errs, err)
 			continue
 		}
 		if st.ClusterID != local.ClusterID || st.MemberID != m.ID {
-			a.logger.Debug("URL belongs to another member", "member", hex(m.ID), "url", url,
-				"cluster", hex(st.ClusterID), "answered", hex(st.MemberID))
+			errs = append(errs, fmt.Errorf("%s answers for cluster %s member %s", url, hex(st.ClusterID), hex(st.MemberID)))
 			continue
 		}
 		lag := local.AppliedIndex - min(local.AppliedIndex, st.AppliedIndex)
-		return len(st.Errors) == 0 && lag <= maxAppliedLag
+		return len(st.Errors) == 0 && lag <= maxAppliedLag, nil
 	}
-	return false
+	return false, errors.Join(errs...)
 }
 
 // publish keeps the member's record current. The lease is renewed on every

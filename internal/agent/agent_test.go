@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/aenix-io/threek/internal/cluster"
 	"github.com/aenix-io/threek/internal/config"
 )
@@ -43,27 +46,49 @@ type fakeCluster struct {
 	revoked     []int64
 	moveErr     error
 	localErr    error
+	statusErr   map[uint64]error
+	tlsErr      map[string]error
+	tlsChanged  map[string]bool
+	events      []string
 	hang        chan struct{}
 	noPeerCA    bool
+	noClientURL map[uint64]bool
 	moves       []uint64
 	statusCalls []string
 }
 
 func newFakeCluster() *fakeCluster {
 	return &fakeCluster{
-		self:       1,
-		leader:     1,
-		cut:        map[[2]uint64]bool{},
-		clusterOf:  map[uint64]uint64{},
-		errorsOf:   map[uint64][]string{},
-		appliedOf:  map[uint64]uint64{},
-		learners:   map[uint64]bool{},
-		identities: map[uint64]string{},
-		silent:     map[uint64]bool{},
-		records:    map[uint64]cluster.Record{},
-		leases:     map[int64]bool{},
+		self:        1,
+		leader:      1,
+		cut:         map[[2]uint64]bool{},
+		clusterOf:   map[uint64]uint64{},
+		errorsOf:    map[uint64][]string{},
+		appliedOf:   map[uint64]uint64{},
+		learners:    map[uint64]bool{},
+		identities:  map[uint64]string{},
+		silent:      map[uint64]bool{},
+		records:     map[uint64]cluster.Record{},
+		leases:      map[int64]bool{},
+		statusErr:   map[uint64]error{},
+		tlsErr:      map[string]error{},
+		tlsChanged:  map[string]bool{},
+		noClientURL: map[uint64]bool{},
 	}
 }
+
+// reloadTLS stands in for the certificate files of the client ("client") or
+// the prober ("peer"); a change is reported once.
+func (f *fakeCluster) reloadTLS(files string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "reload "+files)
+	changed := f.tlsChanged[files]
+	delete(f.tlsChanged, files)
+	return changed, f.tlsErr[files]
+}
+
+func (f *fakeCluster) ReloadTLS() (bool, error) { return f.reloadTLS("client") }
 
 func (f *fakeCluster) setCut(x, y uint64) {
 	f.mu.Lock()
@@ -114,10 +139,15 @@ func (f *fakeCluster) LocalURL() string { return clientURL(f.self) }
 func (f *fakeCluster) Status(ctx context.Context, u string) (cluster.Status, error) {
 	f.mu.Lock()
 	f.statusCalls = append(f.statusCalls, u)
+	f.events = append(f.events, "status")
 	id := f.idOf(u)
 	if id == f.self && f.localErr != nil {
 		f.mu.Unlock()
 		return cluster.Status{}, f.localErr
+	}
+	if err := f.statusErr[id]; err != nil && id != f.self {
+		f.mu.Unlock()
+		return cluster.Status{}, err
 	}
 	if f.hang != nil {
 		hang := f.hang
@@ -150,9 +180,11 @@ func (f *fakeCluster) Members(context.Context) ([]cluster.Member, error) {
 	defer f.mu.Unlock()
 	var members []cluster.Member
 	for _, id := range f.ids() {
-		members = append(members, cluster.Member{
-			ID: id, ClientURLs: []string{clientURL(id)}, PeerURLs: []string{peerURL(id)}, IsLearner: f.learners[id],
-		})
+		m := cluster.Member{ID: id, PeerURLs: []string{peerURL(id)}, IsLearner: f.learners[id]}
+		if !f.noClientURL[id] {
+			m.ClientURLs = []string{clientURL(id)}
+		}
+		members = append(members, m)
 	}
 	return members, nil
 }
@@ -209,6 +241,7 @@ func (f *fakeCluster) RevokeLease(_ context.Context, lease int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, lease)
+	f.events = append(f.events, "revoke")
 	delete(f.leases, lease)
 	delete(f.records, f.self)
 	return nil
@@ -233,6 +266,8 @@ func (f *fakeCluster) movesSoFar() []uint64 {
 type fakeProber struct{ f *fakeCluster }
 
 func (p fakeProber) VerifiesTLS() bool { return !p.f.noPeerCA }
+
+func (p fakeProber) ReloadTLS() (bool, error) { return p.f.reloadTLS("peer") }
 
 func (p fakeProber) Reachable(_ context.Context, peerURLs []string) bool {
 	p.f.mu.Lock()
@@ -421,6 +456,9 @@ func TestMemberOfAnotherClusterIsUnavailable(t *testing.T) {
 	if moves := h.fake.movesSoFar(); len(moves) != 0 {
 		t.Errorf("moves = %v, want none", moves)
 	}
+	if n := strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3","error":"https://m3:2379 answers for cluster bad member 3`); n != 1 {
+		t.Errorf("a URL of another cluster warned %d times, want once with the identity it answers for:\n%s", n, h.logs)
+	}
 }
 
 func TestUnhealthyCandidate(t *testing.T) {
@@ -438,6 +476,72 @@ func TestUnhealthyCandidate(t *testing.T) {
 				t.Errorf("moves = %v, want none", moves)
 			}
 		})
+	}
+}
+
+// Whether a candidate answers its status call decides whether leadership
+// moves, so a failing call is a warning, logged once while it lasts.
+func TestCandidateStatusErrorIsWarned(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	setErr := func(err error) {
+		h.fake.mu.Lock()
+		defer h.fake.mu.Unlock()
+		h.fake.statusErr[3] = err
+	}
+	warned := func() int {
+		return strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3"`)
+	}
+	setErr(errors.New("tls: failed to verify certificate"))
+	h.ticks(3)
+	if n := warned(); n != 1 {
+		t.Errorf("status error of member 3 warned %d times, want once:\n%s", n, h.logs)
+	}
+	setErr(nil)
+	h.ticks(1)
+	setErr(errors.New("tls: failed to verify certificate"))
+	h.fake.setCut(1, 2)
+	h.ticks(10)
+	if n := warned(); n != 2 {
+		t.Errorf("status error of member 3 warned %d times after it came back, want twice:\n%s", n, h.logs)
+	}
+	if moves := h.fake.movesSoFar(); len(moves) != 0 {
+		t.Errorf("moves = %v, want none to a member that fails its status call", moves)
+	}
+}
+
+// gRPC words the error of an unreachable member differently from one poll to
+// the next; that is still the same situation.
+func TestRewordedStatusErrorIsWarnedOnce(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	for i := range 6 {
+		h.fake.mu.Lock()
+		msg := []string{"connection refused", "i/o timeout"}[i%2]
+		h.fake.statusErr[3] = fmt.Errorf("status of %s: %w", clientURL(3), status.Error(codes.Unavailable, msg))
+		h.fake.mu.Unlock()
+		h.ticks(1)
+	}
+	if n := strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3"`); n != 1 {
+		t.Errorf("reworded status errors of member 3 warned %d times, want once:\n%s", n, h.logs)
+	}
+}
+
+func TestMemberWithoutClientURLsIsWarned(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	h.fake.noClientURL[3] = true
+	h.ticks(3)
+	if n := strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3","error":"no client URLs"`); n != 1 {
+		t.Errorf("a member without client URLs warned %d times, want once:\n%s", n, h.logs)
+	}
+}
+
+// A member removed while its status call was failing must not keep an entry
+// in the log of situations forever.
+func TestStatusLogOfRemovedMembersIsDropped(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	h.agent.lastLog["status ff"] = "member status failed"
+	h.ticks(1)
+	if _, ok := h.agent.lastLog["status ff"]; ok {
+		t.Errorf("lastLog keeps the status of a member that is gone: %v", h.agent.lastLog)
 	}
 }
 
