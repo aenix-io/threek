@@ -139,11 +139,11 @@ Both Talos and etcd-operator include `localhost` and `127.0.0.1` in the etcd ser
 - With etcd-operator the agent uses the member's server certificate, which also has the `ClientAuth` extended key usage, as its client certificate, and the member's peer certificate for probes.
 - On Talos it uses the kube-apiserver client certificate for both.
 
-At the start of every poll, before any call, the agent reads the certificate, key and CA files of both the client connection and the probes again.
+At the start of every poll, before any call, the agent reads the certificate, key and CA files of both the client connection and the probes again; so does the poll that withdraws the record when the agent is switched off.
 When any of them changed, it rebuilds the TLS config and closes the connections made with the old files, so a renewed certificate or a rotated CA takes effect without a restart.
 Files that cannot be read or do not make a valid config, such as an empty CA file or a key written before its certificate, are refused with a warning; the agent keeps polling with the previous files until they are fixed.
 
-A leader's agent logs a warning when a transfer candidate fails its status call, since that failure alone keeps leadership from moving to it.
+A leader's agent logs a warning when a transfer candidate fails its status call or its URL answers for another member, since that alone keeps leadership from moving to it.
 
 ## Connectivity signal
 

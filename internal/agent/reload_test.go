@@ -244,7 +244,7 @@ func TestTLSFilesAreReloadedBeforeEveryPoll(t *testing.T) {
 		h.fake.mu.Lock()
 		events := slices.Clone(h.fake.events)
 		h.fake.mu.Unlock()
-		if len(events) < 3 || !slices.Equal(events[:2], []string{"reload client", "reload peer"}) || slices.Contains(events[2:], "reload client") {
+		if len(events) < 3 || !slices.Equal(events[:2], []string{"reload client", "reload peer"}) || slices.Contains(events[2:], "reload client") || slices.Contains(events[2:], "reload peer") {
 			t.Fatalf("events of a poll = %v, want both reloads first and only once", events)
 		}
 	}
@@ -284,5 +284,24 @@ func TestReloadedTLSFilesAreLogged(t *testing.T) {
 	h.ticks(3)
 	if n := strings.Count(h.logs.String(), `"msg":"certificate files reloaded","files":"peer"`); n != 1 {
 		t.Errorf("reload logged %d times, want once:\n%s", n, h.logs)
+	}
+}
+
+// Switching off revokes the lease, which must use the files as they are
+// now: a CA rotated just before would otherwise fail the revoke and leave
+// the record until its TTL.
+func TestTLSFilesAreReloadedBeforeWithdrawing(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeDryRun))
+	src := watched(h, fastConfig(config.ModeDryRun))
+	h.ticks(1)
+	h.fake.mu.Lock()
+	h.fake.events = nil
+	h.fake.mu.Unlock()
+	src.set(fastConfig(config.ModeOff), nil)
+	h.ticks(1)
+	h.fake.mu.Lock()
+	defer h.fake.mu.Unlock()
+	if want := []string{"reload client", "reload peer", "revoke"}; !slices.Equal(h.fake.events, want) {
+		t.Errorf("events of the switch off = %v, want %v", h.fake.events, want)
 	}
 }

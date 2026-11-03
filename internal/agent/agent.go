@@ -252,6 +252,10 @@ func (a *Agent) watchdog(ctx context.Context) {
 // decision.
 func (a *Agent) Tick(ctx context.Context) {
 	a.reload()
+	// Reloading closes the connections made with old files, so it runs
+	// before any call, the revoke of a switch off included.
+	a.reloadTLS("client", a.c.ReloadTLS)
+	a.reloadTLS("peer", a.prober.ReloadTLS)
 	if a.cfg.Mode == config.ModeOff {
 		a.withdraw(ctx)
 		a.metrics.linkUp.Reset()
@@ -259,10 +263,6 @@ func (a *Agent) Tick(ctx context.Context) {
 		a.logChange("decision", slog.LevelInfo, "threek is off", "")
 		return
 	}
-	// Reloading closes the connections made with old files, so it runs
-	// before the poll makes any call.
-	a.reloadTLS("client", a.c.ReloadTLS)
-	a.reloadTLS("peer", a.prober.ReloadTLS)
 	pollCtx, cancel := context.WithTimeout(ctx, a.pollTimeout)
 	obs, err := a.observe(pollCtx)
 	cancel()
@@ -401,8 +401,8 @@ func servesTLS(url string) bool {
 }
 
 // healthy reports whether member m belongs to the local cluster and can take
-// over leadership. The error is that of the status calls when none of them
-// succeeded.
+// over leadership. When no URL answers for m, the error tells why for each
+// of them.
 func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) (bool, error) {
 	var errs []error
 	for _, url := range m.ClientURLs {
@@ -412,8 +412,7 @@ func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Sta
 			continue
 		}
 		if st.ClusterID != local.ClusterID || st.MemberID != m.ID {
-			a.logger.Debug("URL belongs to another member", "member", hex(m.ID), "url", url,
-				"cluster", hex(st.ClusterID), "answered", hex(st.MemberID))
+			errs = append(errs, fmt.Errorf("%s answers for cluster %s member %s", url, hex(st.ClusterID), hex(st.MemberID)))
 			continue
 		}
 		lag := local.AppliedIndex - min(local.AppliedIndex, st.AppliedIndex)

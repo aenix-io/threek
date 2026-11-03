@@ -234,6 +234,7 @@ func (f *fakeCluster) RevokeLease(_ context.Context, lease int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked = append(f.revoked, lease)
+	f.events = append(f.events, "revoke")
 	delete(f.leases, lease)
 	delete(f.records, f.self)
 	return nil
@@ -447,6 +448,9 @@ func TestMemberOfAnotherClusterIsUnavailable(t *testing.T) {
 	h.ticks(20)
 	if moves := h.fake.movesSoFar(); len(moves) != 0 {
 		t.Errorf("moves = %v, want none", moves)
+	}
+	if n := strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3","error":"https://m3:2379 answers for cluster bad member 3`); n != 1 {
+		t.Errorf("a URL of another cluster warned %d times, want once with the identity it answers for:\n%s", n, h.logs)
 	}
 }
 
