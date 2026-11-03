@@ -143,7 +143,7 @@ At the start of every poll, before any call, the agent reads the certificate, ke
 When any of them changed, it rebuilds the TLS config and closes the connections made with the old files, so a renewed certificate or a rotated CA takes effect without a restart.
 Files that cannot be read or do not make a valid config, such as an empty CA file or a key written before its certificate, are refused with a warning; the agent keeps polling with the previous files until they are fixed.
 
-A leader's agent logs a warning when a transfer candidate fails its status call or its URL answers for another member, since that alone keeps leadership from moving to it.
+A leader's agent logs a warning when a transfer candidate has no client URL, fails its status call or its URL answers for another member, since that alone keeps leadership from moving to it. The warning repeats only when the kind of failure changes, not its wording.
 
 ## Connectivity signal
 

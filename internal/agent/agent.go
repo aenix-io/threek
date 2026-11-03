@@ -15,6 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/aenix-io/threek/internal/cluster"
 	"github.com/aenix-io/threek/internal/config"
 	"github.com/aenix-io/threek/internal/engine"
@@ -389,9 +393,35 @@ func (a *Agent) logStatusErrors(errs map[uint64]error) {
 	})
 	for id, err := range errs {
 		if err != nil {
-			a.logChange(prefix+hex(id), slog.LevelWarn, "member status failed", err.Error(), "member", hex(id), "error", err)
+			a.logChange(prefix+hex(id), slog.LevelWarn, "member status failed", errorKind(err), "member", hex(id), "error", err)
 		}
 	}
+}
+
+// errorKind names the situation behind err for logChange. gRPC words the
+// error of the same unreachable member differently on every call, so its
+// code stands in for the text.
+func errorKind(err error) string {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var kinds []string
+		for _, e := range joined.Unwrap() {
+			kinds = append(kinds, errorKind(e))
+		}
+		return strings.Join(kinds, "\n")
+	}
+	var etcdErr rpctypes.EtcdError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return codes.DeadlineExceeded.String()
+	case errors.Is(err, context.Canceled):
+		return codes.Canceled.String()
+	case errors.As(err, &etcdErr):
+		return etcdErr.Code().String()
+	}
+	if st, ok := status.FromError(err); ok {
+		return st.Code().String()
+	}
+	return err.Error()
 }
 
 // servesTLS reports whether an etcd URL uses one of the TLS schemes etcd
@@ -404,6 +434,9 @@ func servesTLS(url string) bool {
 // over leadership. When no URL answers for m, the error tells why for each
 // of them.
 func (a *Agent) healthy(ctx context.Context, m cluster.Member, local cluster.Status) (bool, error) {
+	if len(m.ClientURLs) == 0 {
+		return false, errors.New("no client URLs")
+	}
 	var errs []error
 	for _, url := range m.ClientURLs {
 		st, err := a.c.Status(ctx, url)

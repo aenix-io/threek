@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/aenix-io/threek/internal/cluster"
 	"github.com/aenix-io/threek/internal/config"
 )
@@ -49,26 +52,28 @@ type fakeCluster struct {
 	events      []string
 	hang        chan struct{}
 	noPeerCA    bool
+	noClientURL map[uint64]bool
 	moves       []uint64
 	statusCalls []string
 }
 
 func newFakeCluster() *fakeCluster {
 	return &fakeCluster{
-		self:       1,
-		leader:     1,
-		cut:        map[[2]uint64]bool{},
-		clusterOf:  map[uint64]uint64{},
-		errorsOf:   map[uint64][]string{},
-		appliedOf:  map[uint64]uint64{},
-		learners:   map[uint64]bool{},
-		identities: map[uint64]string{},
-		silent:     map[uint64]bool{},
-		records:    map[uint64]cluster.Record{},
-		leases:     map[int64]bool{},
-		statusErr:  map[uint64]error{},
-		tlsErr:     map[string]error{},
-		tlsChanged: map[string]bool{},
+		self:        1,
+		leader:      1,
+		cut:         map[[2]uint64]bool{},
+		clusterOf:   map[uint64]uint64{},
+		errorsOf:    map[uint64][]string{},
+		appliedOf:   map[uint64]uint64{},
+		learners:    map[uint64]bool{},
+		identities:  map[uint64]string{},
+		silent:      map[uint64]bool{},
+		records:     map[uint64]cluster.Record{},
+		leases:      map[int64]bool{},
+		statusErr:   map[uint64]error{},
+		tlsErr:      map[string]error{},
+		tlsChanged:  map[string]bool{},
+		noClientURL: map[uint64]bool{},
 	}
 }
 
@@ -175,9 +180,11 @@ func (f *fakeCluster) Members(context.Context) ([]cluster.Member, error) {
 	defer f.mu.Unlock()
 	var members []cluster.Member
 	for _, id := range f.ids() {
-		members = append(members, cluster.Member{
-			ID: id, ClientURLs: []string{clientURL(id)}, PeerURLs: []string{peerURL(id)}, IsLearner: f.learners[id],
-		})
+		m := cluster.Member{ID: id, PeerURLs: []string{peerURL(id)}, IsLearner: f.learners[id]}
+		if !f.noClientURL[id] {
+			m.ClientURLs = []string{clientURL(id)}
+		}
+		members = append(members, m)
 	}
 	return members, nil
 }
@@ -499,6 +506,31 @@ func TestCandidateStatusErrorIsWarned(t *testing.T) {
 	}
 	if moves := h.fake.movesSoFar(); len(moves) != 0 {
 		t.Errorf("moves = %v, want none to a member that fails its status call", moves)
+	}
+}
+
+// gRPC words the error of an unreachable member differently from one poll to
+// the next; that is still the same situation.
+func TestRewordedStatusErrorIsWarnedOnce(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	for i := range 6 {
+		h.fake.mu.Lock()
+		msg := []string{"connection refused", "i/o timeout"}[i%2]
+		h.fake.statusErr[3] = fmt.Errorf("status of %s: %w", clientURL(3), status.Error(codes.Unavailable, msg))
+		h.fake.mu.Unlock()
+		h.ticks(1)
+	}
+	if n := strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3"`); n != 1 {
+		t.Errorf("reworded status errors of member 3 warned %d times, want once:\n%s", n, h.logs)
+	}
+}
+
+func TestMemberWithoutClientURLsIsWarned(t *testing.T) {
+	h := newHarness(fastConfig(config.ModeEnforce))
+	h.fake.noClientURL[3] = true
+	h.ticks(3)
+	if n := strings.Count(h.logs.String(), `"level":"WARN","msg":"member status failed","member":"3","error":"no client URLs"`); n != 1 {
+		t.Errorf("a member without client URLs warned %d times, want once:\n%s", n, h.logs)
 	}
 }
 
