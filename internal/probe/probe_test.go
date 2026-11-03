@@ -319,3 +319,15 @@ func TestProbesReuseTheConnection(t *testing.T) {
 		t.Errorf("5 probes opened %d connections, want 1", n)
 	}
 }
+
+// A probe that ends after ReloadTLS returns its connection to the old
+// transport, which nothing closes again.
+func TestIdleConnectionsAreBounded(t *testing.T) {
+	transport, ok := newHTTPClient(nil).Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", newHTTPClient(nil).Transport)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Errorf("IdleConnTimeout = %v, want a bound", transport.IdleConnTimeout)
+	}
+}
