@@ -125,6 +125,20 @@ func write(t *testing.T, path string, content []byte) {
 	}
 }
 
+// appendHalf appends the first half of src to dst.
+func appendHalf(t *testing.T, dst, src string) {
+	t.Helper()
+	head, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, dst, append(head, tail[:len(tail)/2]...))
+}
+
 func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
 	for name, breakFiles := range map[string]func(t *testing.T, f files){
 		"empty CA": func(t *testing.T, f files) { write(t, f.ca, nil) },
@@ -138,6 +152,10 @@ func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
 		"key of another certificate":  func(t *testing.T, f files) { etcdtest.Replace(t, f.key, issue(t).key) },
 		"certificate of another key":  func(t *testing.T, f files) { etcdtest.Replace(t, f.cert, issue(t).cert) },
 		"certificate without its key": func(t *testing.T, f files) { write(t, f.key, nil) },
+		// A file read while it is being written: the blocks before the cut
+		// still parse on their own.
+		"CA bundle cut in the middle": func(t *testing.T, f files) { appendHalf(t, f.ca, issue(t).ca) },
+		"chain cut in the middle":     func(t *testing.T, f files) { appendHalf(t, f.cert, issue(t).ca) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := issue(t)
@@ -158,6 +176,23 @@ func TestBrokenFilesKeepThePreviousConfig(t *testing.T) {
 				t.Errorf("handshake with the previous config: %v", err)
 			}
 		})
+	}
+}
+
+// During a CA rotation the CA file holds the old and the new CA.
+func TestEveryCAOfABundleIsTrusted(t *testing.T) {
+	old, rotated := issue(t), issue(t)
+	var bundle []byte
+	for _, ca := range []string{old.ca, rotated.ca} {
+		content, err := os.ReadFile(ca)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundle = append(bundle, content...)
+	}
+	write(t, rotated.ca, bundle)
+	if err := get(t, newSource(t, rotated).Config(), server(t, rotated)); err != nil {
+		t.Errorf("handshake with a server of the second CA in the bundle: %v", err)
 	}
 }
 

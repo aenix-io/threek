@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -82,6 +83,9 @@ func (s *Source) Reload() (changed bool, err error) {
 func (s *Source) build(cert, key, ca []byte) (*tls.Config, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if s.certFile != "" {
+		if _, err := certificates(s.certFile, cert); err != nil {
+			return nil, err
+		}
 		pair, err := tls.X509KeyPair(cert, key)
 		if err != nil {
 			return nil, fmt.Errorf("%s and %s: %w", s.certFile, s.keyFile, err)
@@ -94,11 +98,43 @@ func (s *Source) build(cert, key, ca []byte) (*tls.Config, error) {
 		}
 	}
 	if s.caFile != "" {
+		ders, err := certificates(s.caFile, ca)
+		if err != nil {
+			return nil, err
+		}
 		cfg.RootCAs = x509.NewCertPool()
-		// An empty pool would trust no server.
-		if !cfg.RootCAs.AppendCertsFromPEM(ca) {
-			return nil, fmt.Errorf("no certificate in %s", s.caFile)
+		for _, der := range ders {
+			c, err := x509.ParseCertificate(der)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", s.caFile, err)
+			}
+			cfg.RootCAs.AddCert(c)
 		}
 	}
 	return cfg, nil
+}
+
+// certificates returns the certificate blocks of a PEM file. It refuses a
+// file with anything but blanks after its last whole block, which is how a
+// file read while it is being written looks: x509 and tls would keep the
+// blocks before the cut and drop the rest without an error.
+func certificates(path string, content []byte) ([][]byte, error) {
+	var ders [][]byte
+	rest := content
+	for {
+		var block *pem.Block
+		if block, rest = pem.Decode(rest); block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			ders = append(ders, block.Bytes)
+		}
+	}
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf("%s holds data outside whole PEM blocks", path)
+	}
+	if len(ders) == 0 {
+		return nil, fmt.Errorf("no certificate in %s", path)
+	}
+	return ders, nil
 }
