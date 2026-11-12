@@ -1,0 +1,249 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "enabledManagers": [
+    "gomod",
+    "dockerfile",
+    "github-actions",
+    "custom.regex"
+  ],
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/vendor/**"
+  ],
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "prConcurrentLimit": 5,
+  "osvVulnerabilityAlerts": true,
+  "platformAutomerge": false,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "etcd release archives the tests download, pinned by sha256. The digest of the new archive comes from the SHA256SUMS of the etcd release.",
+      "managerFilePatterns": [
+        "/^build/etcd\\.sha256$/"
+      ],
+      "matchStrings": [
+        "(?<currentDigest>[a-f0-9]{64})  etcd-(?<currentValue>v\\d+\\.\\d+\\.\\d+)-linux-(?:amd64|arm64)\\.tar\\.gz"
+      ],
+      "depNameTemplate": "etcd-io/etcd",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "kind node images of the policy test matrix. The job name carries the Kubernetes version, so the version and the image move together.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yaml$/"
+      ],
+      "matchStrings": [
+        "kubernetes: (?<currentValue>v\\d+\\.\\d+\\.\\d+), node: \"(?<depName>kindest/node):v\\d+\\.\\d+\\.\\d+@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "autoReplaceStringTemplate": "kubernetes: {{{newValue}}}, node: \"{{{depName}}}:{{{newValue}}}@{{{newDigest}}}\"",
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "kind node image of the etcd-operator end-to-end job.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yaml$/"
+      ],
+      "matchStrings": [
+        "NODE_IMAGE: (?<depName>kindest/node):(?<currentValue>v\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "kind, run with go run and go install.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yaml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>sigs\\.k8s\\.io/kind)@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "cert-manager installed into the kind cluster of the etcd-operator end-to-end tests.",
+      "managerFilePatterns": [
+        "/^test/kubernetes/setup\\.sh$/"
+      ],
+      "matchStrings": [
+        "cert_manager_version=(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "cert-manager/cert-manager",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "etcd-operator installed into the kind cluster of the etcd-operator end-to-end tests.",
+      "managerFilePatterns": [
+        "/^test/kubernetes/setup\\.sh$/"
+      ],
+      "matchStrings": [
+        "operator_version=(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "cozystack/etcd-operator",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "etcd version of the EtcdCluster in the etcd-operator end-to-end tests.",
+      "managerFilePatterns": [
+        "/^test/kubernetes/testdata/cluster\\.yaml$/"
+      ],
+      "matchStrings": [
+        "version: \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "etcd-io/etcd",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "config:recommended makes direct Go module bumps fix(deps); keep every dependency bump chore(deps).",
+      "matchManagers": [
+        "gomod"
+      ],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Renovate skips indirect Go modules by default, so advisories in golang.org/x/* and friends would never get a PR.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "indirect"
+      ],
+      "enabled": true,
+      "groupName": "indirect go modules"
+    },
+    {
+      "description": "The etcd client modules are released together and must stay on one version.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "go.etcd.io/etcd/**"
+      ],
+      "groupName": "etcd go modules"
+    },
+    {
+      "description": "The go directive is the minimum Go version of the module; raising it is a deliberate decision.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "golang"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The build image follows the Go minor version of the go directive: patch and digest updates only.",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/golang",
+        "golang"
+      ],
+      "separateMinorPatch": true
+    },
+    {
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/golang",
+        "golang"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Each etcd and Kubernetes version under test stands for a supported minor version: move it to the latest patch of that minor, and add a new minor to the matrix by hand.",
+      "matchPackageNames": [
+        "etcd-io/etcd",
+        "kindest/node"
+      ],
+      "separateMinorPatch": true
+    },
+    {
+      "matchPackageNames": [
+        "etcd-io/etcd",
+        "kindest/node"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "matchFileNames": [
+        "build/etcd.sha256"
+      ],
+      "groupName": "etcd test binaries"
+    },
+    {
+      "matchPackageNames": [
+        "kindest/node"
+      ],
+      "groupName": "kind node images"
+    },
+    {
+      "description": "Collect digest-only refreshes of images and actions into one weekly PR.",
+      "matchManagers": [
+        "dockerfile",
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pinDigest"
+      ],
+      "groupName": "image and action digests",
+      "schedule": [
+        "before 6am on monday"
+      ]
+    },
+    {
+      "description": "Non-major updates of CI tooling merge once CI passes.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pinDigest"
+      ],
+      "automerge": true,
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "matchPackageNames": [
+        "golangci/golangci-lint",
+        "sigs.k8s.io/kind"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": true,
+      "minimumReleaseAge": "3 days"
+    }
+  ]
+}
