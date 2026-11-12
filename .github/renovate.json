@@ -129,6 +129,19 @@
       "groupName": "indirect go modules"
     },
     {
+      "description": "A major version of a Go module is a different module path, which the direct dependencies choose, not this module.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "indirect"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
       "description": "The etcd client modules are released together and must stay on one version.",
       "matchManagers": [
         "gomod"
