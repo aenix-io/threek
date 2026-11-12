@@ -38,7 +38,7 @@ metadata:
   name: etcd
 spec:
   replicas: 3
-  version: "3.6.11"
+  version: "3.6.16"
   storage:
     size: 1Gi
   additionalMetadata:
