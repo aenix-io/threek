@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -39,6 +40,8 @@ type Member struct {
 	Settings etcdconf.Settings
 	cmd      *exec.Cmd
 	log      string
+	exited   chan struct{}
+	exitErr  error
 }
 
 type Cluster struct {
@@ -59,7 +62,36 @@ func Binary(t *testing.T) string {
 // it has a leader. The cluster is stopped when the test ends.
 func Start(t *testing.T, n int) *Cluster {
 	t.Helper()
+	return start(t, n, freeAddr)
+}
+
+// Ports come from freeAddr, which releases them before etcd binds, so another
+// process can take one in between. A cluster whose member exits before the
+// election is started again on new ports.
+const startAttempts = 3
+
+func start(t *testing.T, n int, addr func(t *testing.T) string) *Cluster {
+	t.Helper()
 	binary := Binary(t)
+	for attempt := 1; ; attempt++ {
+		cl := launch(t, binary, n, addr)
+		err := cl.waitForLeader(t)
+		if err == nil {
+			return cl
+		}
+		var exited *exitError
+		if !errors.As(err, &exited) || attempt == startAttempts {
+			t.Fatal(err)
+		}
+		t.Logf("attempt %d: %v; starting again on new ports", attempt, err)
+		for _, m := range cl.Members {
+			m.stop()
+		}
+	}
+}
+
+func launch(t *testing.T, binary string, n int, addr func(t *testing.T) string) *Cluster {
+	t.Helper()
 	dir := t.TempDir()
 	ca := NewCA(t, dir)
 
@@ -68,8 +100,8 @@ func Start(t *testing.T, n int) *Cluster {
 	for i := range n {
 		m := &Member{
 			Name:      fmt.Sprintf("m%d", i),
-			ClientURL: "https://" + freeAddr(t),
-			PeerURL:   "https://" + freeAddr(t),
+			ClientURL: "https://" + addr(t),
+			PeerURL:   "https://" + addr(t),
 		}
 		cert, key := ca.Issue(t, dir, m.Name)
 		m.Settings = etcdconf.Settings{
@@ -112,9 +144,13 @@ func Start(t *testing.T, n int) *Cluster {
 		if err := m.cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
+		m.exited = make(chan struct{})
+		go func() {
+			m.exitErr = m.cmd.Wait()
+			close(m.exited)
+		}()
 		t.Cleanup(func() {
-			_ = m.cmd.Process.Signal(syscall.SIGTERM)
-			_ = m.cmd.Wait()
+			m.stop()
 			_ = logFile.Close()
 			if t.Failed() {
 				out, _ := os.ReadFile(m.log)
@@ -122,8 +158,24 @@ func Start(t *testing.T, n int) *Cluster {
 			}
 		})
 	}
-	cl.waitForLeader(t)
 	return cl
+}
+
+// stop may be called again after the process is gone.
+func (m *Member) stop() {
+	_ = m.cmd.Process.Signal(syscall.SIGTERM)
+	<-m.exited
+}
+
+// exitError reports a member whose process ended before the cluster elected
+// a leader.
+type exitError struct {
+	m *Member
+}
+
+func (e *exitError) Error() string {
+	out, _ := os.ReadFile(e.m.log)
+	return fmt.Sprintf("%s exited: %v\n%s", e.m.Name, e.m.exitErr, tail(string(out), 5))
 }
 
 // Client returns a client connected to member m only.
@@ -209,16 +261,23 @@ func (cl *Cluster) ByID(t *testing.T, id uint64) *Member {
 	return nil
 }
 
-func (cl *Cluster) waitForLeader(t *testing.T) {
+func (cl *Cluster) waitForLeader(t *testing.T) error {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		for _, m := range cl.Members {
+			select {
+			case <-m.exited:
+				return &exitError{m: m}
+			default:
+			}
+		}
 		if cl.allHaveLeader(t) {
-			return
+			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("cluster did not elect a leader")
+	return errors.New("cluster did not elect a leader")
 }
 
 func (cl *Cluster) allHaveLeader(t *testing.T) bool {
