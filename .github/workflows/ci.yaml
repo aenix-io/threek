@@ -103,15 +103,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - kubernetes: v1.35.8
-            node: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
-            api: v1beta1
-          - kubernetes: v1.36.4
-            node: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
-            api: v1
-          - kubernetes: v1.37.0
-            node: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
-            api: v1
+          - {kubernetes: v1.35.8, node: "kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0", api: v1beta1}
+          - {kubernetes: v1.36.4, node: "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed", api: v1}
+          - {kubernetes: v1.37.0, node: "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5", api: v1}
     name: policy (Kubernetes ${{ matrix.kubernetes }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
