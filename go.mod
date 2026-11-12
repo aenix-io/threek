@@ -9,7 +9,6 @@ require (
 	go.etcd.io/etcd/client/v3 v3.7.2
 	go.uber.org/zap v1.27.1
 	google.golang.org/grpc v1.83.2
-	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -25,8 +24,7 @@ require (
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.4 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
