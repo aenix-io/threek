@@ -212,10 +212,12 @@
       "groupName": "etcd test binaries"
     },
     {
+      "description": "kind node images are built for a kind release: kind and the images move together.",
       "matchPackageNames": [
+        "sigs.k8s.io/kind",
         "kindest/node"
       ],
-      "groupName": "kind node images"
+      "groupName": "kind"
     },
     {
       "description": "Collect digest-only refreshes of images and actions into one weekly PR.",
@@ -233,27 +235,18 @@
       ]
     },
     {
-      "description": "Non-major updates of CI tooling merge once CI passes.",
+      "description": "Non-major updates of the actions and tools of the CI workflow merge once CI passes. The release workflow runs only on tags, so its updates wait for review.",
       "matchManagers": [
         "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/ci.yaml"
       ],
       "matchUpdateTypes": [
         "minor",
         "patch",
         "digest",
         "pinDigest"
-      ],
-      "automerge": true,
-      "minimumReleaseAge": "3 days"
-    },
-    {
-      "matchPackageNames": [
-        "golangci/golangci-lint",
-        "sigs.k8s.io/kind"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch"
       ],
       "automerge": true,
       "minimumReleaseAge": "3 days"
