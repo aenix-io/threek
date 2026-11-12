@@ -8,7 +8,7 @@ set -o errexit -o nounset -o pipefail
 
 cluster=$1
 agent_image=$2
-cert_manager_version=v1.21.2
+cert_manager_version=v1.21.3
 operator_version=v0.5.8
 context="kind-${cluster}"
 here=$(cd "$(dirname "$0")" && pwd)
